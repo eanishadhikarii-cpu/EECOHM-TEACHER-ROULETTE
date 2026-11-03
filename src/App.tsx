@@ -188,7 +188,8 @@ function useServerNow(state: GameState, offsetMs: number) {
 function getCountdown(spin: GameState['spin'], serverNow: number) {
   if (!spin || spin.phase !== 'selection') return null
   const effectiveNow = spin.pausedAt ?? serverNow
-  return Math.max(0, Math.ceil((spin.deadlineAt - effectiveNow) / 1000))
+  const maximumSeconds = Math.ceil(spin.durationMs / 1000)
+  return Math.min(maximumSeconds, Math.max(0, Math.ceil((spin.deadlineAt - effectiveNow) / 1000)))
 }
 
 function WheelDisplay({ state, serverClockOffset, compact = false }: {

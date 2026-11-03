@@ -101,6 +101,13 @@ const expectRejected = async (action, payload) => {
   throw new Error(`${action} unexpectedly succeeded after its selection window closed.`)
 }
 const waitForSpin = async (predicate) => request.waitForState((next) => next.spin && predicate(next.spin))
+const assertWheelTarget = (spin, total, index) => {
+  const segment = 360 / total
+  const expected = (360 - (index * segment + segment / 2) % 360) % 360
+  const actual = ((spin.toRotation % 360) + 360) % 360
+  const difference = Math.min(Math.abs(actual - expected), 360 - Math.abs(actual - expected))
+  if (difference > 0.001) throw new Error(`${spin.wheel} wheel target does not center the selected segment under the pointer.`)
+}
 
 await measuredCommand('round.start', { stake: 100 })
 for (let index = 0; index < 25; index += 1) {
@@ -128,6 +135,7 @@ const mainLocked = await waitForSpin((spin) => spin.wheel === 'main' && spin.pha
 if (mainLocked.spin.resultId !== 'teacher-2' || mainLocked.spin.resultMode !== 'operator-controlled') {
   throw new Error('Main wheel did not lock the latest operator selection.')
 }
+assertWheelTarget(mainLocked.spin, 12, 1)
 await expectRejected('spin.select', { selection: 'teacher-4' })
 await new Promise((resolve) => setTimeout(resolve, Math.max(0, mainLocked.spin.startedAt + mainLocked.spin.durationMs - Date.now() + 100)))
 const mainStopped = await request.waitForState((next) => next.currentStage === 'stage2' && !next.spin)
@@ -150,6 +158,7 @@ const riskLocked = await waitForSpin((spin) => spin.wheel === 'risk' && spin.pha
 if (riskLocked.spin.resultId !== '3' || riskLocked.spin.resultMode !== 'operator-controlled') {
   throw new Error('Risk wheel did not lock the selected multiplier.')
 }
+assertWheelTarget(riskLocked.spin, 3, 1)
 await expectRejected('spin.select', { selection: '4' })
 await new Promise((resolve) => setTimeout(resolve, Math.max(0, riskLocked.spin.startedAt + riskLocked.spin.durationMs - Date.now() + 100)))
 await request.waitForState((next) => next.currentRound?.riskMultiplier === 3 && !next.spin)
