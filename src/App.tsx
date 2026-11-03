@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from 'react'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
   Activity,
@@ -72,10 +72,14 @@ function App() {
       onError: setConnectionError,
     })
     clientRef.current = client
-    client.connect()
+    let effectActive = true
+    queueMicrotask(() => {
+      if (effectActive) client.connect()
+    })
     window.addEventListener('beforeinstallprompt', handleInstallPrompt)
     if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js')
     return () => {
+      effectActive = false
       client.close()
       clientRef.current = null
       window.removeEventListener('beforeinstallprompt', handleInstallPrompt)
@@ -133,6 +137,17 @@ function App() {
               />}
         />
         <Route path="/audience" element={<AudienceScreen state={state} connectionStatus={connectionStatus} serverClockOffset={serverClockOffset} />} />
+        <Route
+          path="/risk"
+          element={isAdminLoggedIn
+            ? <RiskRoulettePage
+                state={state}
+                sendCommand={sendCommand}
+                connectionStatus={connectionStatus}
+                serverClockOffset={serverClockOffset}
+              />
+            : <AudienceScreen state={state} connectionStatus={connectionStatus} serverClockOffset={serverClockOffset} riskOnly />}
+        />
       </Routes>
     </BrowserRouter>
   )
@@ -161,7 +176,7 @@ function LoginScreen({
         <p>Event control panel</p>
         <p className="demo-warning">Login is verified by the game server. Configure server-only credentials before use.</p>
         <label>
-          Email
+          Username
           <input value={loginForm.email} onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })} />
         </label>
         <label>
@@ -192,10 +207,11 @@ function getCountdown(spin: GameState['spin'], serverNow: number) {
   return Math.min(maximumSeconds, Math.max(0, Math.ceil((spin.deadlineAt - effectiveNow) / 1000)))
 }
 
-function WheelDisplay({ state, serverClockOffset, compact = false }: {
+function WheelDisplay({ state, serverClockOffset, compact = false, wheel = 'main' }: {
   state: GameState
   serverClockOffset: number
   compact?: boolean
+  wheel?: 'main' | 'risk'
 }) {
   const activeTeachers = state.teachers
   const wheelGradient = `conic-gradient(${activeTeachers
@@ -226,12 +242,11 @@ function WheelDisplay({ state, serverClockOffset, compact = false }: {
     ? animation.delay
     : spin ? `${(spin.startedAt - state.serverTime) / 1000}s` : '0s'
   const countdown = getCountdown(spin, serverNow)
-  const animationFor = (wheel: 'main' | 'risk') => spin?.wheel === wheel ? spin : null
-  const wheelStyle = (wheel: 'main' | 'risk'): CSSProperties => {
-    const wheelSpin = animationFor(wheel)
+  const wheelStyle = (targetWheel: 'main' | 'risk'): CSSProperties => {
+    const wheelSpin = spin?.wheel === targetWheel ? spin : null
     const preview = wheelSpin?.phase === 'selection'
     const stopping = wheelSpin?.phase === 'decelerating'
-    const rotation = wheel === 'main' ? state.outerWheelRotation : state.innerWheelRotation
+    const rotation = targetWheel === 'main' ? state.outerWheelRotation : state.innerWheelRotation
     return {
       transform: `rotate(${rotation}deg)`,
       '--wheel-start': `${wheelSpin?.fromRotation ?? rotation}deg`,
@@ -242,46 +257,47 @@ function WheelDisplay({ state, serverClockOffset, compact = false }: {
       animationIterationCount: preview ? 'infinite' : '1',
       animationFillMode: stopping ? 'both' : undefined,
       animationDelay: wheelSpin ? animationDelay : '0s',
-      animationPlayState: state.pausedWheel === wheel ? 'paused' : 'running',
+      animationPlayState: state.pausedWheel === targetWheel ? 'paused' : 'running',
     } as CSSProperties
   }
 
   return (
     <div className={`wheel-wrap ${compact ? 'admin-wheel-wrap' : ''}`}>
       <div className="wheel-pointer" />
-      <div
-        key={`outer-${state.outerSpinSequence}`}
-        className="wheel teacher-wheel"
-        style={{ ...wheelStyle('main'), background: wheelGradient }}
-      >
-        {activeTeachers.map((teacher, index) => {
-          const angle = (360 / activeTeachers.length) * (index + 0.5)
-          return (
-            <div
-              key={teacher.id}
-              className="teacher-label"
-              style={{ transform: `rotate(${angle}deg) translateY(-45%) rotate(${-angle}deg)` }}
-            >
-              {teacher.name}
-            </div>
-          )
-        })}
-      </div>
-      <div
-        key={`inner-${state.innerSpinSequence}`}
-        className="wheel inner-wheel"
-        style={{
-          ...wheelStyle('risk'),
-          background: `conic-gradient(${riskColors[0]} 0deg 120deg, ${riskColors[1]} 120deg 240deg, ${riskColors[2]} 240deg 360deg)`,
-        }}
-      >
-        {([0, 3, 4] as const).map((multiplier, index) => {
-          const angle = index * 120 + 60
-          return <div key={multiplier} className="inner-label" style={{ transform: `rotate(${angle}deg) translateY(-39%) rotate(${-angle}deg)` }}>{multiplier}X</div>
-        })}
-      </div>
+      {wheel === 'main'
+        ? <div
+            key={`outer-${state.outerSpinSequence}`}
+            className="wheel teacher-wheel"
+            style={{ ...wheelStyle('main'), background: wheelGradient }}
+          >
+            {activeTeachers.map((teacher, index) => {
+              const angle = (360 / activeTeachers.length) * (index + 0.5)
+              return (
+                <div
+                  key={teacher.id}
+                  className="teacher-label"
+                  style={{ transform: `rotate(${angle}deg) translateY(-45%) rotate(${-angle}deg)` }}
+                >
+                  {teacher.name}
+                </div>
+              )
+            })}
+          </div>
+        : <div
+            key={`inner-${state.innerSpinSequence}`}
+            className="wheel risk-wheel-display"
+            style={{
+              ...wheelStyle('risk'),
+              background: `conic-gradient(${riskColors[0]} 0deg 120deg, ${riskColors[1]} 120deg 240deg, ${riskColors[2]} 240deg 360deg)`,
+            }}
+          >
+            {([0, 3, 4] as const).map((multiplier, index) => {
+              const angle = index * 120 + 60
+              return <div key={multiplier} className="inner-label" style={{ transform: `rotate(${angle}deg) translateY(-39%) rotate(${-angle}deg)` }}>{multiplier}X</div>
+            })}
+          </div>}
       <div className="center-spin" aria-hidden="true">
-        {spin?.phase === 'selection' && countdown !== null ? countdown : spin?.phase === 'decelerating' ? 'LOCK' : 'SPIN'}
+        {spin?.phase === 'selection' && spin.wheel === wheel && countdown !== null ? countdown : spin?.phase === 'decelerating' && spin.wheel === wheel ? 'LOCK' : ''}
       </div>
     </div>
   )
@@ -290,7 +306,7 @@ function WheelDisplay({ state, serverClockOffset, compact = false }: {
 function CountdownPanel({ state, serverClockOffset }: { state: GameState; serverClockOffset: number }) {
   const serverNow = useServerNow(state, serverClockOffset)
   const spin = state.spin
-  if (!spin) return <div className="countdown-panel"><span>SELECTION WINDOW</span><strong>15 seconds</strong></div>
+  if (!spin) return <div className="countdown-panel"><span>NO ACTIVE SPIN</span><strong>READY</strong></div>
   const countdown = getCountdown(spin, serverNow)
   const spinOutcome = spin.wheel === 'main'
     ? getTeacherById(state.teachers, spin.resultId ?? spin.selectedId)?.name
@@ -335,16 +351,19 @@ function AdminDashboard({
   installPrompt: InstallPromptEvent | null
   onInstallPromptConsumed: () => void
 }) {
+  const navigate = useNavigate()
   const [activeSection, setActiveSection] = useState('dashboard')
   const [actionError, setActionError] = useState('')
-  const [stakeEdit, setStakeEdit] = useState({ value: String(state.currentStake), source: state.currentStake })
-  const stakeDraft = stakeEdit.source === state.currentStake ? stakeEdit.value : String(state.currentStake)
+  const [betDrafts, setBetDrafts] = useState<Record<string, string>>({})
   const currentRound = state.currentRound
+  const totalConfiguredBets = Object.values(state.teacherBets).reduce((total, amount) => total + amount, 0)
   const isRoundActive = currentRound?.status === 'in-progress'
   const connected = connectionStatus === 'connected'
   const serverNow = useServerNow(state, serverClockOffset)
   const mainSelection = state.spin?.wheel === 'main' ? state.spin.selectedId : null
-  const riskSelection = state.spin?.wheel === 'risk' ? state.spin.selectedId : null
+  const eligibleStake = currentRound?.actualTeacherId
+    ? currentRound.teacherBets[currentRound.actualTeacherId] ?? 0
+    : 0
 
   const runCommand = (action: string, payload: Record<string, unknown> = {}, message = 'Action failed.') => {
     void sendCommand(action, payload)
@@ -352,17 +371,35 @@ function AdminDashboard({
       .catch((error: unknown) => setActionError(error instanceof Error ? error.message : message))
   }
 
-  const updateStake = () => {
-    const stake = Number(stakeDraft)
-    if (!Number.isInteger(stake) || stake < state.settings.minimumStake || stake > state.settings.maximumStake) {
-      setActionError(`Stake must be a whole number from ${state.settings.minimumStake} to ${state.settings.maximumStake}.`)
+  const updateTeacherBet = (teacherId: string) => {
+    const amount = Number(betDrafts[teacherId])
+    if (!Number.isSafeInteger(amount) || amount < 0 || amount > state.settings.maximumStake) {
+      setActionError(`Each teacher's bet total must be a whole number from 0 to ${state.settings.maximumStake}.`)
       return
     }
-    runCommand('admin.state.update', { state: { ...state, currentStake: stake } }, 'Could not update stake.')
+    void sendCommand('admin.bets.update', { teacherId, amount })
+      .then(() => {
+        setActionError('')
+        setBetDrafts((current) => {
+          if (current[teacherId] !== String(amount)) return current
+          const next = { ...current }
+          delete next[teacherId]
+          return next
+        })
+      })
+      .catch((error: unknown) => setActionError(error instanceof Error ? error.message : 'Could not update teacher bets.'))
   }
 
-  const startRound = () => runCommand('round.start', { stake: state.currentStake }, 'Could not start round.')
+  const startRound = () => runCommand('round.start')
   const select = (selection: string | number) => runCommand('spin.select', { selection: String(selection) }, 'Could not update selection.')
+  const chooseRisk = async () => {
+    try {
+      await sendCommand('stage2.start')
+      navigate('/risk')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not open the risk stage.')
+    }
+  }
   const handleInstall = async () => {
     if (!installPrompt) return
     await installPrompt.prompt()
@@ -376,10 +413,10 @@ function AdminDashboard({
 
   const stats = useMemo(() => [
     { label: 'Rounds played', value: String(state.history.length), icon: Activity },
-    { label: 'Current stake', value: formatStake(currentRound?.originalStake ?? state.currentStake), icon: CircleDollarSign },
-    { label: 'Potential payout', value: formatStake(currentRound?.originalStake ? currentRound.originalStake * Math.max(state.settings.matchMultiplier, 4) : 0), icon: BadgeCheck },
+    { label: 'Total bets', value: formatStake(currentRound?.originalStake ?? state.currentStake), icon: CircleDollarSign },
+    { label: 'Eligible winning bets', value: formatStake(eligibleStake), icon: BadgeCheck },
     { label: 'Manual results', value: String(state.auditLog.length), icon: Shield },
-  ], [state.history.length, state.auditLog.length, state.currentStake, state.settings.matchMultiplier, currentRound?.originalStake])
+  ], [state.history.length, state.auditLog.length, state.currentStake, currentRound?.originalStake, eligibleStake])
 
   const selectedTeacher = getTeacherById(state.teachers, currentRound?.actualTeacherId ?? mainSelection ?? state.selectedTeacherId)
   const activeSpinExpired = Boolean(state.spin?.phase === 'selection' && !state.pausedWheel && state.spin.deadlineAt <= serverNow)
@@ -394,7 +431,7 @@ function AdminDashboard({
         <nav>
           <button className={`nav-button ${activeSection === 'dashboard' ? 'active' : ''}`} onClick={() => navTo('dashboard')}>Dashboard</button>
           <button className={`nav-button ${activeSection === 'main-wheel' ? 'active' : ''}`} onClick={() => navTo('main-wheel')}>Main Wheel</button>
-          <button className={`nav-button ${activeSection === 'risk-wheel' ? 'active' : ''}`} onClick={() => navTo('risk-wheel')}>Risk Wheel</button>
+          <button className={`nav-button ${activeSection === 'risk-wheel' ? 'active' : ''}`} onClick={() => navigate('/risk')}>Risk Roulette</button>
           <button className={`nav-button ${activeSection === 'settings' ? 'active' : ''}`} onClick={() => navTo('settings')}>Settings</button>
         </nav>
         <div className={`sync-status connection-${connectionStatus}`} role="status">
@@ -409,7 +446,7 @@ function AdminDashboard({
         <header className="topbar" id="dashboard">
           <div><h2>Admin dashboard</h2><p>{state.eventName} · operator-controlled roulette</p></div>
           <div className="toolbar-actions">
-            <button className="primary-button" onClick={startRound} disabled={!connected || Boolean(isRoundActive)}>New round</button>
+            <button className="primary-button" onClick={startRound} disabled={!connected || Boolean(isRoundActive) || totalConfiguredBets <= 0}>New round</button>
             <button className="secondary-button" onClick={() => window.open('/audience', '_blank')}>Open audience</button>
           </div>
         </header>
@@ -425,12 +462,13 @@ function AdminDashboard({
 
         <section className="mobile-summary" aria-label="Current game summary">
           {[
-            ['Current stake', formatStake(currentRound?.originalStake ?? state.currentStake)],
+            ['Total bets', formatStake(currentRound?.originalStake ?? state.currentStake)],
             ['Selected teacher', selectedTeacher?.name ?? 'Not selected'],
+            ['Eligible bets', formatStake(eligibleStake)],
             ['Game stage', state.currentStage.replace('-', ' ')],
             ['Main wheel', state.spin?.wheel === 'main' ? state.spin.phase : currentRound?.actualTeacherId ? 'Result locked' : 'Ready'],
             ['Risk wheel', state.spin?.wheel === 'risk' ? state.spin.phase : currentRound?.riskMultiplier !== null && currentRound?.riskMultiplier !== undefined ? `${currentRound.riskMultiplier}X locked` : state.currentStage === 'risk-spin' ? 'Ready' : 'Locked'],
-            ['Potential payout', formatStake((currentRound?.originalStake ?? state.currentStake) * Math.max(state.settings.matchMultiplier, 4))],
+            ['Potential payout', formatStake(eligibleStake * Math.max(state.settings.matchMultiplier, 4))],
             ['Final payout', formatStake(currentRound?.status === 'completed' ? currentRound.finalPayout : 0)],
           ].map(([label, value]) => <div className="summary-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}
           <div className="summary-card"><span>Average / max sync</span><strong>{latencyStats.average} / {latencyStats.maximum} ms</strong></div>
@@ -448,33 +486,43 @@ function AdminDashboard({
 
         <section className="control-grid" id="round-controls">
           <div className="panel">
-            <div className="panel-header"><h3>Event round</h3><BadgeCheck size={16} /></div>
-            <div className="field-group">
-              <label htmlFor="round-stake">Stake</label>
-              <div className="stake-entry">
-                <input id="round-stake" type="number" min={state.settings.minimumStake} max={state.settings.maximumStake} value={stakeDraft}
-                  disabled={!connected || Boolean(isRoundActive)}
-                  onChange={(event) => setStakeEdit({ value: event.target.value, source: state.currentStake })}
-                  onBlur={updateStake}
-                  onKeyDown={(event) => { if (event.key === 'Enter') updateStake() }} />
-                <span>points</span>
-              </div>
-              <p className="field-hint">Allowed stake: {formatStake(state.settings.minimumStake)}–{formatStake(state.settings.maximumStake)}.</p>
+            <div className="panel-header"><h3>Round management &amp; teacher bets</h3><BadgeCheck size={16} /></div>
+            <p className="field-hint">Enter anonymous total bets per teacher. The team records one collect-or-risk decision for all bets on the winning teacher. Max {formatStake(state.settings.maximumStake)} per teacher.</p>
+            <div className="bet-entry-grid">
+              {state.teachers.map((teacher) => (
+                <label className="bet-entry-row" key={teacher.id}>
+                  <span>{teacher.name}</span>
+                  <input
+                    aria-label={`${teacher.name} total bets`}
+                    type="number"
+                    min={0}
+                    max={state.settings.maximumStake}
+                    step={1}
+                    value={betDrafts[teacher.id] ?? String(state.teacherBets[teacher.id] ?? 0)}
+                    disabled={!connected || state.currentStage !== 'waiting' || Boolean(isRoundActive)}
+                    onChange={(event) => setBetDrafts((current) => ({ ...current, [teacher.id]: event.target.value }))}
+                    onBlur={() => updateTeacherBet(teacher.id)}
+                    onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
+                  />
+                  <strong>{formatStake(state.teacherBets[teacher.id] ?? 0)}</strong>
+                </label>
+              ))}
+            </div>
+            <div className="readout"><strong>Total bets entered:</strong> {formatStake(currentRound?.originalStake ?? state.currentStake)}</div>
+            <div className="control-row">
+              <button className="primary-button" onClick={startRound} disabled={!connected || Boolean(isRoundActive) || totalConfiguredBets <= 0}>Start new round</button>
+              <button className="secondary-button" onClick={() => runCommand('round.next')} disabled={!connected || Boolean(isRoundActive) || state.currentStage !== 'waiting'}>Clear bets</button>
             </div>
             <div className="control-row">
-              <button className="primary-button" onClick={startRound} disabled={!connected || Boolean(isRoundActive)}>Start new round</button>
-              <button className="secondary-button" onClick={() => runCommand('round.next')} disabled={!connected || Boolean(isRoundActive)}>Start next round</button>
-            </div>
-            <div className="control-row">
-              <button className="secondary-button" onClick={() => runCommand('round.collect')} disabled={!connected || state.currentStage !== 'stage2' || !isRoundActive}>Collect {state.settings.matchMultiplier}X</button>
               <button className="secondary-button" onClick={() => runCommand('round.reset')} disabled={!connected || !isRoundActive}>Cancel round</button>
+              {state.currentStage === 'risk-spin' && <button className="primary-button" onClick={() => navigate('/risk')}>Open Risk Roulette</button>}
             </div>
           </div>
           <div className="panel">
             <div className="panel-header"><h3>Round status</h3><Activity size={16} /></div>
             <div className="readout"><strong>Stage:</strong> {state.currentStage.replace('-', ' ')}</div>
             <div className="readout"><strong>Selected teacher:</strong> {selectedTeacher?.name ?? 'Waiting for selection'}</div>
-            <div className="readout"><strong>Stake:</strong> {formatStake(currentRound?.originalStake ?? state.currentStake)}</div>
+            <div className="readout"><strong>Eligible winning bets:</strong> {formatStake(eligibleStake)}</div>
             <div className="readout"><strong>Payout:</strong> {formatStake(currentRound?.finalPayout ?? 0)}</div>
             <p className="field-hint">Wheel results are labelled operator-controlled when selected by the admin, or random when no selection is made.</p>
           </div>
@@ -484,19 +532,22 @@ function AdminDashboard({
           <div className="panel" id="main-wheel">
             <div className="panel-header"><h3>Main wheel control</h3><Crown size={16} /></div>
             <div className="admin-wheel-container"><WheelDisplay state={state} serverClockOffset={serverClockOffset} compact /></div>
+            <div className="touch-controls main-wheel-controls">
+              <button className="primary-button" onClick={() => runCommand('teacher.spin')} disabled={!connected || !isRoundActive || state.currentStage !== 'teacher-spin' || Boolean(state.spin)}><Play size={16} /> START SPIN</button>
+            </div>
             <CountdownPanel state={state} serverClockOffset={serverClockOffset} />
             <div className="field-group">
-              <label>{mainSelection ? 'Change selection' : 'Select winning teacher'} · 15-second window</label>
+              <label>{mainSelection ? 'Change selection' : 'Select winning teacher'} · during the 10-second spin</label>
               <div className="teacher-select-grid">
                 {state.teachers.map((teacher) => (
                   <TeacherSelectionButton key={teacher.id} teacher={teacher} selected={mainSelection === teacher.id}
+                    betTotal={currentRound?.teacherBets[teacher.id] ?? state.teacherBets[teacher.id] ?? 0}
                     disabled={!connected || state.spin?.wheel !== 'main' || state.spin.phase !== 'selection' || activeSpinExpired}
                     onClick={() => select(teacher.id)} />
                 ))}
               </div>
             </div>
             <div className="touch-controls">
-              <button className="primary-button" onClick={() => runCommand('teacher.spin')} disabled={!connected || !isRoundActive || state.currentStage !== 'teacher-spin' || Boolean(state.spin)}><Play size={16} /> START SPIN</button>
               <button className="primary-button" onClick={() => runCommand('teacher.confirm')} disabled={!connected || state.spin?.wheel !== 'main' || state.spin.phase !== 'selection' || activeSpinExpired}>CONFIRM SELECTION</button>
               <button className="secondary-button" onClick={() => runCommand(state.pausedWheel === 'main' ? 'wheel.resume' : 'wheel.pause', { wheel: 'main' })}
                 disabled={!connected || state.spin?.wheel !== 'main' || state.spin.phase !== 'selection'}><Pause size={16} /> {state.pausedWheel === 'main' ? 'RESUME' : 'PAUSE'}</button>
@@ -505,41 +556,25 @@ function AdminDashboard({
             </div>
           </div>
 
-          <div className="panel" id="risk-wheel">
-            <div className="panel-header"><h3>Risk wheel control</h3><Swords size={16} /></div>
-            <div className="admin-wheel-container"><WheelDisplay state={state} serverClockOffset={serverClockOffset} compact /></div>
-            <CountdownPanel state={state} serverClockOffset={serverClockOffset} />
-            <div className="control-row">
-              <button className="secondary-button" onClick={() => runCommand('stage2.start')} disabled={!connected || state.currentStage !== 'stage2' || !isRoundActive}>Begin Stage 2</button>
-              <button className="secondary-button" onClick={() => runCommand('round.collect')} disabled={!connected || state.currentStage !== 'stage2' || !isRoundActive}>Collect {state.settings.matchMultiplier}X</button>
-            </div>
-            <div className="field-group">
-              <label>{riskSelection ? 'Change multiplier' : 'Select multiplier'} · 15-second window</label>
-              <div className="risk-choice-grid">
-                {([0, 3, 4] as const).map((multiplier) => (
-                  <button className={`risk-choice ${riskSelection === String(multiplier) ? 'selected' : ''}`} key={multiplier}
-                    disabled={!connected || state.spin?.wheel !== 'risk' || state.spin.phase !== 'selection' || activeSpinExpired}
-                    onClick={() => select(multiplier)}>SELECT {multiplier}X</button>
-                ))}
-              </div>
-            </div>
-            <div className="touch-controls">
-              <button className="primary-button" onClick={() => runCommand('risk.spin')} disabled={!connected || !isRoundActive || state.currentStage !== 'risk-spin' || Boolean(state.spin) || currentRound?.riskMultiplier !== null}><Play size={16} /> START RISK SPIN</button>
-              <button className="primary-button" onClick={() => runCommand('risk.confirm')}
-                disabled={!connected || state.spin?.wheel !== 'risk' || state.spin.phase !== 'selection' || activeSpinExpired}>CONFIRM SELECTION</button>
-              <button className="secondary-button" onClick={() => runCommand(state.pausedWheel === 'risk' ? 'wheel.resume' : 'wheel.pause', { wheel: 'risk' })}
-                disabled={!connected || state.spin?.wheel !== 'risk' || state.spin.phase !== 'selection'}><Pause size={16} /> {state.pausedWheel === 'risk' ? 'RESUME' : 'PAUSE'}</button>
-              <button className="secondary-button" onClick={() => runCommand('wheel.reset', { wheel: 'risk' })}
-                disabled={!connected || state.spin?.wheel !== 'risk' || state.spin.phase !== 'selection'}><RotateCcw size={16} /> RESET</button>
-              <button className="primary-button" onClick={() => runCommand('risk.confirm')}
-                disabled={!connected || Boolean(state.spin) || state.currentStage !== 'risk-spin' || currentRound?.riskMultiplier === null}>CONFIRM PAYOUT</button>
-            </div>
-            <div className="field-group">
-              <label>Locked multiplier</label>
-              <div className="readout">{currentRound?.riskMultiplier === null || currentRound?.riskMultiplier === undefined ? '—' : `${currentRound.riskMultiplier}X · ${currentRound.riskResultMode ?? 'pending'}`}</div>
-            </div>
-          </div>
         </section>
+
+        {state.currentStage === 'stage2' && isRoundActive && (
+          <section className="panel decision-panel" aria-labelledby="risk-decision">
+            <div className="panel-header"><h3 id="risk-decision">DO YOU WANT TO TAKE A RISK?</h3><Swords size={18} /></div>
+            <p>Your teacher result is locked. Choose to collect the match payout or open the separate risk wheel.</p>
+            <div className="decision-actions">
+              <button className="primary-button" onClick={chooseRisk} disabled={!connected}>YES — TAKE THE RISK</button>
+              <button className="secondary-button" onClick={() => runCommand('round.collect')} disabled={!connected}>NO — COLLECT {state.settings.matchMultiplier}X</button>
+            </div>
+          </section>
+        )}
+        {state.currentStage === 'no-winners' && isRoundActive && (
+          <section className="panel decision-panel" aria-labelledby="no-winners-title">
+            <div className="panel-header"><h3 id="no-winners-title">NO WINNING BETS</h3><BadgeCheck size={18} /></div>
+            <p>{selectedTeacher?.name ?? 'The selected teacher'} has no eligible bets. Confirm to close this round with a 0-point payout.</p>
+            <button className="primary-button" onClick={() => runCommand('round.no-winners.confirm')} disabled={!connected}>CONFIRM — NO PAYOUT</button>
+          </section>
+        )}
 
         <section className="bottom-grid">
           <div className="panel">
@@ -597,62 +632,193 @@ function AdminDashboard({
           <button onClick={() => navTo('dashboard')}>Home</button>
           <button onClick={() => navTo('round-controls')}>Round</button>
           <button onClick={() => navTo('main-wheel')}>Main</button>
-          <button onClick={() => navTo('risk-wheel')}>Risk</button>
+          <button onClick={() => navigate('/risk')}>Risk</button>
         </nav>
       </main>
     </div>
   )
 }
 
-function TeacherSelectionButton({ teacher, selected, disabled, onClick }: {
+function RiskRoulettePage({
+  state,
+  sendCommand,
+  connectionStatus,
+  serverClockOffset,
+}: {
+  state: GameState
+  sendCommand: (action: string, payload?: Record<string, unknown>) => Promise<Record<string, unknown>>
+  connectionStatus: ConnectionStatus
+  serverClockOffset: number
+}) {
+  const navigate = useNavigate()
+  const [actionError, setActionError] = useState('')
+  const connected = connectionStatus === 'connected'
+  const round = state.currentRound
+  const spin = state.spin
+  const serverNow = useServerNow(state, serverClockOffset)
+  const selectionExpired = Boolean(spin?.phase === 'selection' && !state.pausedWheel && spin.deadlineAt <= serverNow)
+  const selectedMultiplier = spin?.wheel === 'risk' ? spin.selectedId : null
+  const lockedMultiplier = round?.riskMultiplier
+  const isRoundActive = round?.status === 'in-progress'
+  const eligibleStake = round?.actualTeacherId ? round.teacherBets[round.actualTeacherId] ?? 0 : 0
+
+  const runCommand = (action: string, payload: Record<string, unknown> = {}) => {
+    void sendCommand(action, payload)
+      .then(() => setActionError(''))
+      .catch((error: unknown) => setActionError(error instanceof Error ? error.message : 'Action failed.'))
+  }
+  const confirmPayout = async () => {
+    try {
+      await sendCommand('risk.confirm')
+      setActionError('')
+      navigate('/admin')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Payout could not be confirmed.')
+    }
+  }
+
+  return (
+    <div className="risk-page">
+      <header className="risk-page-header">
+        <div>
+          <div className="eyebrow">PRIVATE ADMIN CONTROLS</div>
+          <h1>RISK ROULETTE</h1>
+          <p>Separate second stage · Eligible winning bets {formatStake(eligibleStake)}</p>
+        </div>
+        <div className={`sync-status connection-${connectionStatus}`} role="status">
+          {connectionStatus === 'connected' ? <Wifi size={16} /> : <WifiOff size={16} />}
+          <span>{connectionStatus.toUpperCase()}</span>
+          <button className="secondary-button" onClick={() => navigate('/admin')}>Main game</button>
+        </div>
+      </header>
+      {actionError && <p className="login-error" role="alert">{actionError}</p>}
+      <main className="risk-page-content">
+        <div className="panel risk-wheel-panel">
+          <div className="panel-header"><h2>Choose the risk outcome</h2><Swords size={20} /></div>
+          <div className="admin-wheel-container"><WheelDisplay state={state} serverClockOffset={serverClockOffset} wheel="risk" /></div>
+          <div className="touch-controls risk-touch-controls">
+            <button className="primary-button" onClick={() => runCommand('risk.spin')}
+              disabled={!connected || !isRoundActive || state.currentStage !== 'risk-spin' || Boolean(spin) || lockedMultiplier !== null}>
+              <Play size={16} /> START RISK SPIN
+            </button>
+          </div>
+          <CountdownPanel state={state} serverClockOffset={serverClockOffset} />
+          <div className="risk-choice-grid">
+            {([0, 3, 4] as const).map((multiplier) => (
+              <button
+                className={`risk-choice ${selectedMultiplier === String(multiplier) ? 'selected' : ''}`}
+                key={multiplier}
+                disabled={!connected || spin?.wheel !== 'risk' || spin.phase !== 'selection' || selectionExpired}
+                onClick={() => runCommand('spin.select', { selection: String(multiplier) })}
+              >
+                {multiplier}X
+              </button>
+            ))}
+          </div>
+          <div className="touch-controls risk-touch-controls">
+            <button className="primary-button" onClick={() => runCommand('risk.confirm')}
+              disabled={!connected || spin?.wheel !== 'risk' || spin.phase !== 'selection' || selectionExpired}>
+              CONFIRM SELECTION
+            </button>
+            <button className="secondary-button" onClick={() => runCommand(state.pausedWheel === 'risk' ? 'wheel.resume' : 'wheel.pause', { wheel: 'risk' })}
+              disabled={!connected || spin?.wheel !== 'risk' || spin.phase !== 'selection'}>
+              <Pause size={16} /> {state.pausedWheel === 'risk' ? 'RESUME' : 'PAUSE'}
+            </button>
+            <button className="secondary-button" onClick={() => runCommand('wheel.reset', { wheel: 'risk' })}
+              disabled={!connected || spin?.wheel !== 'risk' || spin.phase !== 'selection'}>
+              <RotateCcw size={16} /> RESET
+            </button>
+            <button className="primary-button" onClick={() => void confirmPayout()}
+              disabled={!connected || !isRoundActive || Boolean(spin) || lockedMultiplier === null || lockedMultiplier === undefined}>
+              CONFIRM PAYOUT
+            </button>
+          </div>
+          <div className="risk-result-readout">
+            <span>Locked result</span>
+            <strong>{lockedMultiplier === null || lockedMultiplier === undefined ? 'Waiting for spin' : `${lockedMultiplier}X · ${round?.riskResultMode ?? 'pending'}`}</strong>
+            <span>Potential final payout</span>
+            <strong>{formatStake(eligibleStake * (lockedMultiplier ?? 0))}</strong>
+          </div>
+        </div>
+      </main>
+    </div>
+  )
+}
+
+function TeacherSelectionButton({ teacher, selected, betTotal, disabled, onClick }: {
   teacher: Teacher
   selected: boolean
+  betTotal: number
   disabled: boolean
   onClick: () => void
 }) {
   return (
     <button className={`teacher-select ${selected ? 'selected' : ''}`} disabled={disabled} onClick={onClick}>
-      <span style={{ backgroundColor: teacher.color }} />{teacher.name}
+      <span className="teacher-select-swatch" style={{ backgroundColor: teacher.color }} />
+      <span className="teacher-select-name">{teacher.name}</span>
+      <small>{formatStake(betTotal)}</small>
     </button>
   )
 }
 
-function AudienceScreen({ state, connectionStatus, serverClockOffset }: {
+function AudienceScreen({ state, connectionStatus, serverClockOffset, riskOnly = false }: {
   state: GameState
   connectionStatus: ConnectionStatus
   serverClockOffset: number
+  riskOnly?: boolean
 }) {
+  const navigate = useNavigate()
+  const audienceServerNow = useServerNow(state, serverClockOffset)
   const selectedId = state.spin?.wheel === 'main' ? state.spin.selectedId : state.currentRound?.actualTeacherId
   const selectedTeacher = getTeacherById(state.teachers, selectedId ?? null)
-  const riskSpin = state.spin?.wheel === 'risk' ? state.spin : null
+  const showingRisk = riskOnly || state.currentStage === 'risk-spin'
+  const activeSpin = state.spin?.wheel === (showingRisk ? 'risk' : 'main') ? state.spin : null
+  const announcement = state.currentStage === 'stage2'
+    ? 'DO YOU WANT TO TAKE A RISK?'
+    : state.currentRound?.status === 'completed'
+      ? state.audienceMessage
+      : state.currentStage === 'no-winners'
+        ? state.audienceMessage
+        : showingRisk
+        ? state.currentRound?.riskMultiplier !== null && state.currentRound?.riskMultiplier !== undefined
+          ? `Risk result: ${state.currentRound.riskMultiplier}X`
+          : ''
+        : state.currentRound?.actualTeacherId
+          ? `Selected teacher: ${selectedTeacher?.name ?? '—'}`
+          : state.currentStage === 'waiting'
+            ? state.audienceMessage
+            : ''
+  const resultMode = showingRisk ? state.currentRound?.riskResultMode : state.currentRound?.mainResultMode
+
+  useEffect(() => {
+    if (connectionStatus !== 'connected') return
+    if (riskOnly && state.currentStage !== 'risk-spin') navigate('/audience', { replace: true })
+    else if (!riskOnly && state.currentStage === 'risk-spin') navigate('/risk', { replace: true })
+  }, [connectionStatus, navigate, riskOnly, state.currentStage])
 
   return (
     <div className="audience-shell">
       <header className="audience-header">
-        <div><div className="eyebrow">{state.eventName} · Operator-controlled event roulette</div><h1>{state.gameTitle}</h1></div>
+        <div><div className="eyebrow">{state.eventName} · Operator-controlled event roulette</div><h1>{showingRisk ? 'RISK ROULETTE' : state.gameTitle}</h1></div>
         <div className={`audience-status connection-${connectionStatus}`}>
           <span>{connectionStatus.toUpperCase()}</span><small>{state.currentStage.toUpperCase()}</small>
         </div>
       </header>
 
       <div className="audience-layout">
-        <div className="wheel-panel"><WheelDisplay state={state} serverClockOffset={serverClockOffset} /></div>
-        <aside className="audience-side">
-          <CountdownPanel state={state} serverClockOffset={serverClockOffset} />
-          <div className="glass-card">
-            <div className="card-row"><span>Selected teacher</span><strong>{selectedTeacher?.name ?? '—'}</strong></div>
-            <div className="card-row"><span>Stake</span><strong>{formatStake(state.currentRound?.originalStake ?? state.currentStake)}</strong></div>
-            <div className="card-row"><span>Current stage</span><strong>{state.currentStage.replace('-', ' ')}</strong></div>
-            {riskSpin?.selectedId && <div className="card-row"><span>{riskSpin.phase === 'decelerating' && riskSpin.resultMode === 'random' ? 'Random result' : 'Operator selection'}</span><strong>{riskSpin.selectedId}X · {riskSpin.resultMode === 'random' ? 'random' : 'operator-controlled'}</strong></div>}
-            {state.currentRound?.mainResultMode && <div className="card-row"><span>Main result mode</span><strong>{state.currentRound.mainResultMode}</strong></div>}
-            {state.currentRound?.riskResultMode && <div className="card-row"><span>Risk result mode</span><strong>{state.currentRound.riskResultMode}</strong></div>}
-            <div className="card-row"><span>Final payout</span><strong>{formatStake(state.currentRound?.status === 'completed' ? state.currentRound.finalPayout : 0)}</strong></div>
-          </div>
-          <motion.div className="glass-card wide-card" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-            <h3>{state.audienceMessage}</h3>
-              <p className="audience-prompt">Results are operator-controlled when the admin selects an outcome; otherwise, the result is random.</p>
-          </motion.div>
-        </aside>
+        <div className="audience-announcement" aria-live="polite">
+          {announcement && <h2>{announcement}</h2>}
+          {activeSpin?.phase === 'selection' && <p>{getCountdown(activeSpin, audienceServerNow)} seconds · select outcome on the admin panel</p>}
+          {activeSpin?.phase === 'decelerating' && <p>Result locked · slowing to a stop</p>}
+          {resultMode && <p>{resultMode === 'random' ? 'Random result' : 'Operator-controlled result'}</p>}
+          {state.currentRound?.status === 'completed' && <p>Final payout: {formatStake(state.currentRound.finalPayout)} · returning to the main game shortly</p>}
+        </div>
+        <div className="wheel-panel audience-wheel-panel">
+          <WheelDisplay state={state} serverClockOffset={serverClockOffset} wheel={showingRisk ? 'risk' : 'main'} />
+          <button className="audience-spin-button" type="button" disabled aria-live="polite">
+            {activeSpin ? 'SPINNING…' : 'SPIN'}
+          </button>
+        </div>
       </div>
     </div>
   )

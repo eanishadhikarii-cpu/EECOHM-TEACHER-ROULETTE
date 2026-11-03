@@ -55,7 +55,8 @@ function createInitialState() {
     },
     currentStage: 'waiting',
     selectedTeacherId: null,
-    currentStake: 100,
+    currentStake: 0,
+    teacherBets: Object.fromEntries(seedTeachers.map((_, index) => [`teacher-${index + 1}`, 0])),
     selectedTeacherRoll: null,
     currentRound: null,
     history: [],
@@ -86,6 +87,13 @@ function readState() {
       settings: { ...defaults.settings, ...saved.settings },
       revision: Number(saved.revision) || 0,
     }
+    restored.teacherBets = Object.fromEntries(
+      defaults.teachers.map((teacher) => {
+        const amount = saved.teacherBets?.[teacher.id]
+        return [teacher.id, Number.isSafeInteger(amount) && amount >= 0 && amount <= defaults.settings.maximumStake ? amount : 0]
+      }),
+    )
+    restored.currentStake = Object.values(restored.teacherBets).reduce((total, amount) => total + amount, 0)
     delete restored.players
     delete restored.currentPlayerId
     delete restored.recentWinners
@@ -113,6 +121,7 @@ function stripPlayerFields(round) {
   void resultMode
   return {
     ...cleanRound,
+    teacherBets: cleanRound.teacherBets ?? (cleanRound.actualTeacherId ? { [cleanRound.actualTeacherId]: cleanRound.originalStake ?? 0 } : {}),
     stageOneResult: cleanRound.actualTeacherId ? 'selected' : 'pending',
     mainResultMode: cleanRound.mainResultMode ?? (cleanRound.actualTeacherId ? resultMode === 'manual' ? 'operator-controlled' : 'random' : null),
     riskResultMode: cleanRound.riskResultMode ?? (cleanRound.riskMultiplier !== null ? resultMode === 'manual' ? 'operator-controlled' : 'random' : null),
@@ -135,25 +144,43 @@ import * as awaitImportFs from 'node:fs'
 
 persistState()
 
-function publicState() {
-  return { ...state, serverTime: Date.now() }
+function publicState(socket) {
+  const snapshot = { ...state, serverTime: Date.now() }
+  if (socket?.authenticated) return snapshot
+
+  const hiddenBets = Object.fromEntries(state.teachers.map((teacher) => [teacher.id, 0]))
+  const publicSpin = state.spin ? {
+    ...state.spin,
+    selectedId: null,
+    resultId: null,
+    resultMode: null,
+    selectionActionId: null,
+  } : undefined
+  return {
+    ...snapshot,
+    currentStake: 0,
+    teacherBets: hiddenBets,
+    currentRound: state.currentRound ? { ...state.currentRound, originalStake: 0, teacherBets: hiddenBets } : null,
+    history: [],
+    auditLog: [],
+    selectedTeacherId: state.spin?.wheel === 'main' ? null : state.selectedTeacherId,
+    spin: publicSpin,
+    audienceMessage: state.spin?.phase === 'selection'
+      ? 'The wheel is spinning. The winning selection is private until it stops.'
+      : state.audienceMessage,
+  }
 }
 
 function send(socket, payload) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload))
 }
 
-function broadcast(payload) {
-  const message = JSON.stringify(payload)
-  for (const socket of clients) {
-    if (socket.readyState === WebSocket.OPEN) socket.send(message)
-  }
-}
-
 function broadcastState(event = 'state') {
   state.serverTime = Date.now()
   persistState()
-  broadcast({ type: event, state: publicState(), serverTime: Date.now() })
+  for (const socket of clients) {
+    send(socket, { type: event, state: publicState(socket), serverTime: Date.now() })
+  }
 }
 
 function findTeacher(id, activeOnly = false) {
@@ -169,6 +196,14 @@ function randomRisk() {
   return [0, 3, 4][randomInt(3)]
 }
 
+function winningStake(round) {
+  return round?.actualTeacherId ? Number(round.teacherBets?.[round.actualTeacherId]) || 0 : 0
+}
+
+function formatPoints(amount) {
+  return `${amount.toLocaleString()} points`
+}
+
 function targetRotation(index, total, currentRotation) {
   const segment = 360 / total
   const stop = (360 - (index * segment + segment / 2) % 360) % 360
@@ -181,19 +216,49 @@ function finishRound(round) {
   round.status = 'completed'
   state.history.unshift({ ...round, completedAt: new Date().toISOString() })
   state.currentStage = 'final'
+  scheduleRoundReturn()
 }
+
+let roundReturnTimer
+
+function returnToMainAfterFinal() {
+  if (state.currentStage !== 'final' || state.currentRound?.status !== 'completed') return
+  state = {
+    ...state,
+    currentRound: null,
+    currentStage: 'waiting',
+    selectedTeacherId: null,
+    selectedTeacherRoll: null,
+    currentStake: 0,
+    teacherBets: Object.fromEntries(state.teachers.map((teacher) => [teacher.id, 0])),
+    spin: null,
+    pausedWheel: null,
+    audienceMessage: 'Ready for the next event round.',
+    lastAction: 'Returned to the main game after the result',
+    revision: state.revision + 1,
+  }
+  broadcastState('state')
+}
+
+function scheduleRoundReturn() {
+  clearTimeout(roundReturnTimer)
+  roundReturnTimer = setTimeout(returnToMainAfterFinal, 5000)
+}
+
+if (state.currentStage === 'final' && state.currentRound?.status === 'completed') scheduleRoundReturn()
 
 function startWheelSelection(wheel, actionId) {
   const now = Date.now()
   const startedAt = now + 250
+  const durationMs = 10000
   const fromRotation = wheel === 'main' ? state.outerWheelRotation : state.innerWheelRotation
   state.spin = {
     wheel,
     phase: 'selection',
     actionId,
     startedAt,
-    durationMs: 15000,
-    deadlineAt: startedAt + 15000,
+    durationMs,
+    deadlineAt: startedAt + durationMs,
     selectedId: null,
     selectionActionId: null,
     resultId: null,
@@ -204,7 +269,7 @@ function startWheelSelection(wheel, actionId) {
   state.pausedWheel = null
   if (wheel === 'main') state.outerSpinSequence += 1
   else state.innerSpinSequence += 1
-  state.audienceMessage = `${wheel === 'main' ? 'Main' : 'Risk'} wheel selection is open for 15 seconds.`
+  state.audienceMessage = `${wheel === 'main' ? 'Main' : 'Risk'} wheel selection is open for 10 seconds.`
   state.lastAction = `${wheel === 'main' ? 'Main' : 'Risk'} wheel started`
 }
 
@@ -241,16 +306,19 @@ function completeSpin(wheel) {
   if (wheel === 'main') {
     const teacher = findTeacher(spin.resultId)
     if (!teacher || !spin.resultMode) return false
+    const eligibleStake = Number(round.teacherBets?.[teacher.id]) || 0
     state.currentRound = {
       ...round,
       actualTeacherId: teacher.id,
       stageOneResult: 'selected',
       mainResultMode: spin.resultMode,
-      finalPayout: round.originalStake * state.settings.matchMultiplier,
+      finalPayout: 0,
     }
     state.selectedTeacherRoll = teacher.id
-    state.currentStage = 'stage2'
-    state.audienceMessage = `Selected teacher: ${teacher.name}. ${spin.resultMode === 'operator-controlled' ? 'Operator-controlled result.' : 'Random result.'}`
+    state.currentStage = eligibleStake > 0 ? 'stage2' : 'no-winners'
+    state.audienceMessage = eligibleStake > 0
+      ? `Winning teacher: ${teacher.name}. ${formatPoints(eligibleStake)} in bets are eligible to collect or take a risk.`
+      : `No winning bets on ${teacher.name}. The team must confirm to return to the main game.`
     state.lastAction = 'Main wheel result locked'
   } else {
     const multiplier = Number(spin.resultId)
@@ -336,10 +404,15 @@ function applyAdminUpdate(candidate) {
     throw new Error('Invalid game settings or teacher update.')
   }
   if (candidate.teachers.filter((teacher) => teacher.isActive).length === 0) throw new Error('At least one teacher must remain active.')
-  const stake = Number(candidate.currentStake)
-  if (!Number.isInteger(stake) || stake < candidate.settings.minimumStake || stake > candidate.settings.maximumStake) {
-    throw new Error('Stake must be a whole number within the configured limits.')
+  const maximumStake = Number(candidate.settings.maximumStake)
+  const matchMultiplier = Number(candidate.settings.matchMultiplier)
+  if (!Number.isSafeInteger(maximumStake) || maximumStake <= 0 || !Number.isFinite(matchMultiplier) || matchMultiplier <= 0) {
+    throw new Error('Maximum bet and match multiplier must be positive valid numbers.')
   }
+  if (Object.values(state.teacherBets).some((amount) => amount > maximumStake)) {
+    throw new Error('Maximum bet cannot be lower than an already entered teacher total.')
+  }
+  const stake = Object.values(state.teacherBets).reduce((total, amount) => total + amount, 0)
   state = {
     ...state,
     gameTitle: String(candidate.gameTitle).slice(0, 80),
@@ -354,16 +427,34 @@ function applyAdminUpdate(candidate) {
 function applyCommand(action, payload, actionId) {
   const round = state.currentRound
   switch (action) {
+    case 'admin.bets.update': {
+      if (state.currentStage !== 'waiting' || round?.status === 'in-progress') throw new Error('Bets can only be updated between rounds.')
+      const teacher = findTeacher(String(payload.teacherId ?? ''), true)
+      const amount = Number(payload.amount)
+      if (!teacher) throw new Error('Choose an active teacher for this bet total.')
+      if (!Number.isSafeInteger(amount) || amount < 0 || amount > state.settings.maximumStake) {
+        throw new Error(`Bet total must be a whole number from 0 to ${state.settings.maximumStake}.`)
+      }
+      const teacherBets = { ...state.teacherBets, [teacher.id]: amount }
+      state = {
+        ...state,
+        teacherBets,
+        currentStake: Object.values(teacherBets).reduce((total, bet) => total + bet, 0),
+        lastAction: `Updated bets for ${teacher.name}`,
+      }
+      break
+    }
     case 'round.start': {
       if (round?.status === 'in-progress') throw new Error('An active round already exists.')
-      const stake = Number(payload.stake)
-      if (!Number.isInteger(stake) || stake < state.settings.minimumStake || stake > state.settings.maximumStake) {
-        throw new Error(`Stake must be a whole number from ${state.settings.minimumStake} to ${state.settings.maximumStake}.`)
-      }
+      clearTimeout(roundReturnTimer)
+      const teacherBets = { ...state.teacherBets }
+      const stake = Object.values(teacherBets).reduce((total, amount) => total + amount, 0)
+      if (stake <= 0) throw new Error('Enter at least one teacher bet total before starting a round.')
       const newRound = {
         id: randomUUID(),
         actualTeacherId: null,
         originalStake: stake,
+        teacherBets,
         stageOneResult: 'pending',
         stageTwoDecision: null,
         riskMultiplier: null,
@@ -398,7 +489,7 @@ function applyCommand(action, payload, actionId) {
       }
       state.spin = { ...spin, selectedId: selection, selectionActionId: actionId }
       state.selectedTeacherId = spin.wheel === 'main' ? selection : state.selectedTeacherId
-      state.audienceMessage = `Operator selection: ${spin.wheel === 'main' ? findTeacher(selection)?.name : `${selection}X`}.`
+      state.audienceMessage = 'The wheel is spinning. The winning selection is private until it stops.'
       state.lastAction = `${spin.wheel === 'main' ? 'Main' : 'Risk'} wheel selection changed`
       break
     }
@@ -406,13 +497,21 @@ function applyCommand(action, payload, actionId) {
       if (!lockSpin('main')) throw new Error('There is no open main-wheel selection to confirm.')
       break
     case 'stage2.start':
-      if (!round || round.status !== 'in-progress' || state.currentStage !== 'stage2' || round.stageTwoDecision) throw new Error('Stage 2 is not ready.')
-      state = { ...state, currentStage: 'risk-spin', spin: null, audienceMessage: 'The risk wheel selection window is ready.', lastAction: 'Risk wheel enabled' }
+      if (!round || round.status !== 'in-progress' || state.currentStage !== 'stage2' || round.stageTwoDecision || winningStake(round) <= 0) throw new Error('Risk is only available when the winning teacher has eligible bets.')
+      state = { ...state, currentStage: 'risk-spin', spin: null, audienceMessage: 'DO YOU WANT TO TAKE A RISK? The risk wheel is ready.', lastAction: 'Administrator chose to take the risk' }
       break
     case 'round.collect': {
       if (!round || round.status !== 'in-progress' || state.currentStage !== 'stage2' || round.stageTwoDecision) throw new Error('The 2X payout is not available.')
-      const completed = { ...round, stageTwoDecision: 'collect', finalPayout: round.originalStake * state.settings.matchMultiplier }
-      state = { ...state, currentRound: completed, spin: null, audienceMessage: `Final result: collected ${completed.finalPayout} points.`, lastAction: 'Collected 2X payout' }
+      const eligibleStake = winningStake(round)
+      const completed = { ...round, stageTwoDecision: 'collect', finalPayout: eligibleStake * state.settings.matchMultiplier }
+      state = { ...state, currentRound: completed, spin: null, audienceMessage: `NO — COLLECT ${state.settings.matchMultiplier}X. ${formatPoints(eligibleStake)} eligible stake pays ${formatPoints(completed.finalPayout)}.`, lastAction: `Collected ${state.settings.matchMultiplier}X payout` }
+      finishRound(completed)
+      break
+    }
+    case 'round.no-winners.confirm': {
+      if (!round || round.status !== 'in-progress' || state.currentStage !== 'no-winners' || winningStake(round) !== 0) throw new Error('This round does not have a no-winning-bets result to confirm.')
+      const completed = { ...round, stageTwoDecision: 'no-winners', finalPayout: 0 }
+      state = { ...state, currentRound: completed, audienceMessage: `No winning bets. ${findTeacher(round.actualTeacherId)?.name ?? 'The selected teacher'} was not backed.`, lastAction: 'Confirmed no winning bets' }
       finishRound(completed)
       break
     }
@@ -420,8 +519,9 @@ function applyCommand(action, payload, actionId) {
       if (state.spin?.wheel === 'risk' && lockSpin('risk')) break
       if (!round || round.status !== 'in-progress' || state.currentStage !== 'risk-spin' || state.spin || round.riskMultiplier === null) throw new Error('There is no locked risk result to confirm.')
       const multiplier = round.riskMultiplier
-      const completed = { ...round, stageTwoDecision: 'risk', finalPayout: round.originalStake * multiplier }
-      state = { ...state, currentRound: completed, spin: null, audienceMessage: `Final risk result: ${multiplier}X for ${completed.finalPayout} points.`, lastAction: 'Risk wheel payout confirmed' }
+      const eligibleStake = winningStake(round)
+      const completed = { ...round, stageTwoDecision: 'risk', finalPayout: eligibleStake * multiplier }
+      state = { ...state, currentRound: completed, spin: null, audienceMessage: `Final risk result: ${multiplier}X on ${formatPoints(eligibleStake)} eligible stake for ${formatPoints(completed.finalPayout)}.`, lastAction: 'Risk wheel payout confirmed' }
       finishRound(completed)
       break
     }
@@ -451,7 +551,8 @@ function applyCommand(action, payload, actionId) {
       break
     case 'round.next':
       if (round?.status === 'in-progress') throw new Error('Finalize or cancel the active round before starting another.')
-      state = { ...state, currentRound: null, currentStage: 'waiting', selectedTeacherRoll: null, spin: null, selectedTeacherId: null, currentStake: state.settings.defaultStake, outerWheelStartRotation: state.outerWheelRotation, innerWheelStartRotation: state.innerWheelRotation, pausedWheel: null, audienceMessage: 'Ready for the next event round.', lastAction: 'Prepared next round' }
+      clearTimeout(roundReturnTimer)
+      state = { ...state, currentRound: null, currentStage: 'waiting', selectedTeacherRoll: null, spin: null, selectedTeacherId: null, currentStake: 0, teacherBets: Object.fromEntries(state.teachers.map((teacher) => [teacher.id, 0])), outerWheelStartRotation: state.outerWheelRotation, innerWheelStartRotation: state.innerWheelRotation, pausedWheel: null, audienceMessage: 'Ready for the next event round. Enter teacher bet totals to begin.', lastAction: 'Prepared next round' }
       break
     case 'round.reset': {
       if (!round || round.status !== 'in-progress') throw new Error('There is no active round to reset.')
@@ -528,7 +629,7 @@ websocketServer.on('connection', (socket) => {
   socket.authenticated = false
   socket.loginFailures = 0
   socket.lastSequence = 0
-  send(socket, { type: 'connection', status: 'connected', state: publicState(), serverTime: Date.now() })
+  send(socket, { type: 'connection', status: 'connected', state: publicState(socket), serverTime: Date.now() })
 
   socket.on('pong', () => { socket.isAlive = true })
   socket.on('message', async (raw) => {
@@ -552,7 +653,7 @@ websocketServer.on('connection', (socket) => {
       sessions.set(token, Date.now() + 12 * 60 * 60 * 1000)
       socket.authenticated = true
       socket.token = token
-      send(socket, { type: 'ack', requestId: message.requestId, ok: true, token, state: publicState() })
+      send(socket, { type: 'ack', requestId: message.requestId, ok: true, token, state: publicState(socket) })
       return
     }
 
@@ -561,7 +662,7 @@ websocketServer.on('connection', (socket) => {
       if (expiry && expiry > Date.now()) {
         socket.authenticated = true
         socket.token = message.token
-        send(socket, { type: 'ack', requestId: message.requestId, ok: true, state: publicState() })
+        send(socket, { type: 'ack', requestId: message.requestId, ok: true, state: publicState(socket) })
       } else {
         sessions.delete(message.token)
         send(socket, { type: 'ack', requestId: message.requestId, ok: false, error: 'Admin session expired.' })
@@ -576,7 +677,7 @@ websocketServer.on('connection', (socket) => {
     }
 
     if (message.type === 'state.get') {
-      send(socket, { type: 'state', state: publicState(), serverTime: Date.now() })
+      send(socket, { type: 'state', state: publicState(socket), serverTime: Date.now() })
       return
     }
     if (message.type === 'heartbeat') {

@@ -3,6 +3,7 @@ export type StageName =
   | 'teacher-spin'
   | 'stage2'
   | 'risk-spin'
+  | 'no-winners'
   | 'final'
 
 export type RiskMultiplier = 0 | 3 | 4
@@ -34,7 +35,8 @@ export interface ActiveRound {
   actualTeacherId: string | null
   originalStake: number
   stageOneResult: 'pending' | 'selected'
-  stageTwoDecision: 'collect' | 'risk' | null
+  stageTwoDecision: 'collect' | 'risk' | 'no-winners' | null
+  teacherBets: Record<string, number>
   riskMultiplier: RiskMultiplier | null
   finalPayout: number
   status: 'in-progress' | 'completed' | 'cancelled'
@@ -64,6 +66,7 @@ export interface GameState {
   currentStage: StageName
   selectedTeacherId: string | null
   currentStake: number
+  teacherBets: Record<string, number>
   selectedTeacherRoll: string | null
   currentRound: ActiveRound | null
   history: RoundHistoryEntry[]
