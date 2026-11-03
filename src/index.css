@@ -530,6 +530,93 @@ input, select {
   white-space: nowrap;
 }
 
+.anonymous-bet-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(6rem, 0.6fr) auto;
+  align-items: end;
+  gap: 0.65rem;
+  margin: 0.8rem 0;
+}
+
+.anonymous-bet-form label,
+.settings-grid label {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.anonymous-bet-form input,
+.anonymous-bet-form select,
+.settings-grid input {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: #101b2d;
+  color: #fff;
+}
+
+.anonymous-bet-list,
+.eligible-bet-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.8rem 0;
+}
+
+.anonymous-bet-row,
+.eligible-bet-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.anonymous-bet-row > span,
+.eligible-bet-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.anonymous-bet-row small,
+.eligible-bet-row small {
+  color: #9fb7d7;
+}
+
+.anonymous-bet-row button {
+  min-height: 40px;
+  padding: 0.4rem 0.65rem;
+}
+
+.teacher-bet-totals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.eligible-bet-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+}
+
+.eligible-bet-row > div:first-child {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.eligible-bet-row .decision-actions {
+  margin-top: 0;
+}
+
+.selected-decision {
+  outline: 2px solid #ffd966;
+  outline-offset: 2px;
+}
+
 .teacher-list {
   display: grid;
   gap: 0.75rem;
@@ -1300,6 +1387,33 @@ th {
 
   .bet-entry-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .anonymous-bet-form {
+    grid-template-columns: minmax(0, 1fr) minmax(5rem, 0.6fr);
+  }
+
+  .anonymous-bet-form > button {
+    grid-column: 1 / -1;
+    min-height: 48px;
+  }
+
+  .teacher-bet-totals,
+  .eligible-bet-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .anonymous-bet-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .anonymous-bet-row small,
+  .anonymous-bet-row button {
+    grid-column: 2;
+  }
+
+  .eligible-bet-row .decision-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   input,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
@@ -354,16 +354,46 @@ function AdminDashboard({
   const navigate = useNavigate()
   const [activeSection, setActiveSection] = useState('dashboard')
   const [actionError, setActionError] = useState('')
-  const [betDrafts, setBetDrafts] = useState<Record<string, string>>({})
+  const [newBetTeacherId, setNewBetTeacherId] = useState(state.teachers[0]?.id ?? '')
+  const [newBetStakeDraft, setNewBetStakeDraft] = useState({
+    defaultStake: state.settings.defaultStake,
+    value: String(state.settings.defaultStake),
+  })
+  const newBetStake = newBetStakeDraft.defaultStake === state.settings.defaultStake
+    ? newBetStakeDraft.value
+    : String(state.settings.defaultStake)
+  const setNewBetStake = (value: string) => setNewBetStakeDraft({
+    defaultStake: state.settings.defaultStake,
+    value,
+  })
+  const defaultBetLimitDrafts = {
+    minimumStake: String(state.settings.minimumStake),
+    defaultStake: String(state.settings.defaultStake),
+    maximumStake: String(state.settings.maximumStake),
+  }
+  const betLimitSettingsKey = `${state.settings.minimumStake}:${state.settings.defaultStake}:${state.settings.maximumStake}`
+  const [betLimitDraftState, setBetLimitDraftState] = useState({
+    settingsKey: betLimitSettingsKey,
+    values: defaultBetLimitDrafts,
+  })
+  const betLimitDrafts = betLimitDraftState.settingsKey === betLimitSettingsKey
+    ? betLimitDraftState.values
+    : defaultBetLimitDrafts
+  const setBetLimitDrafts = (update: (current: typeof defaultBetLimitDrafts) => typeof defaultBetLimitDrafts) => {
+    setBetLimitDraftState({ settingsKey: betLimitSettingsKey, values: update(betLimitDrafts) })
+  }
   const currentRound = state.currentRound
-  const totalConfiguredBets = Object.values(state.teacherBets).reduce((total, amount) => total + amount, 0)
+  const totalConfiguredBets = state.bets.reduce((total, bet) => total + bet.stake, 0)
   const isRoundActive = currentRound?.status === 'in-progress'
+  const currentBets = currentRound ? currentRound.bets : state.bets
+  const eligibleBets = currentRound?.actualTeacherId
+    ? currentRound.bets.filter((bet) => bet.teacherId === currentRound.actualTeacherId)
+    : []
   const connected = connectionStatus === 'connected'
   const serverNow = useServerNow(state, serverClockOffset)
   const mainSelection = state.spin?.wheel === 'main' ? state.spin.selectedId : null
-  const eligibleStake = currentRound?.actualTeacherId
-    ? currentRound.teacherBets[currentRound.actualTeacherId] ?? 0
-    : 0
+  const eligibleStake = eligibleBets.reduce((total, bet) => total + bet.stake, 0)
+  const decisionsComplete = eligibleBets.length > 0 && eligibleBets.every((bet) => bet.decision !== null)
 
   const runCommand = (action: string, payload: Record<string, unknown> = {}, message = 'Action failed.') => {
     void sendCommand(action, payload)
@@ -371,35 +401,52 @@ function AdminDashboard({
       .catch((error: unknown) => setActionError(error instanceof Error ? error.message : message))
   }
 
-  const updateTeacherBet = (teacherId: string) => {
-    const amount = Number(betDrafts[teacherId])
-    if (!Number.isSafeInteger(amount) || amount < 0 || amount > state.settings.maximumStake) {
-      setActionError(`Each teacher's bet total must be a whole number from 0 to ${state.settings.maximumStake}.`)
+  const addBet = async () => {
+    const amount = Number(newBetStake)
+    if (!Number.isSafeInteger(amount) || amount < state.settings.minimumStake || amount > state.settings.maximumStake) {
+      setActionError(`Each anonymous bet must be a whole number from ${state.settings.minimumStake} to ${state.settings.maximumStake}.`)
       return
     }
-    void sendCommand('admin.bets.update', { teacherId, amount })
-      .then(() => {
-        setActionError('')
-        setBetDrafts((current) => {
-          if (current[teacherId] !== String(amount)) return current
-          const next = { ...current }
-          delete next[teacherId]
-          return next
-        })
-      })
-      .catch((error: unknown) => setActionError(error instanceof Error ? error.message : 'Could not update teacher bets.'))
-  }
-
-  const startRound = () => runCommand('round.start')
-  const select = (selection: string | number) => runCommand('spin.select', { selection: String(selection) }, 'Could not update selection.')
-  const chooseRisk = async () => {
     try {
-      await sendCommand('stage2.start')
-      navigate('/risk')
+      await sendCommand('admin.bet.add', { teacherId: newBetTeacherId, amount })
+      setNewBetStake(String(state.settings.defaultStake))
+      setActionError('')
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not open the risk stage.')
+      setActionError(error instanceof Error ? error.message : 'Could not record this bet.')
     }
   }
+
+  const saveBetLimits = () => {
+    const minimumStake = Number(betLimitDrafts.minimumStake)
+    const defaultStake = Number(betLimitDrafts.defaultStake)
+    const maximumStake = Number(betLimitDrafts.maximumStake)
+    if (![minimumStake, defaultStake, maximumStake].every(Number.isSafeInteger)
+      || minimumStake <= 0 || minimumStake > defaultStake || defaultStake > maximumStake) {
+      setActionError('Set whole-number bet limits where minimum ≤ default ≤ maximum.')
+      return
+    }
+    runCommand('admin.state.update', {
+      state: {
+        ...state,
+        settings: { ...state.settings, minimumStake, defaultStake, maximumStake },
+      },
+    })
+  }
+
+  const removeBet = (betId: string) => runCommand('admin.bet.remove', { betId })
+  const setBetDecision = (betId: string, decision: 'collect' | 'risk') =>
+    runCommand('round.bet.decision', { betId, decision })
+  const confirmBetDecisions = async () => {
+    try {
+      await sendCommand('round.decisions.confirm')
+      setActionError('')
+      if (eligibleBets.some((bet) => bet.decision === 'risk')) navigate('/risk')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not confirm bet decisions.')
+    }
+  }
+  const startRound = () => runCommand('round.start')
+  const select = (selection: string | number) => runCommand('spin.select', { selection: String(selection) }, 'Could not update selection.')
   const handleInstall = async () => {
     if (!installPrompt) return
     await installPrompt.prompt()
@@ -411,12 +458,12 @@ function AdminDashboard({
     document.getElementById(section)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  const stats = useMemo(() => [
+  const stats = [
     { label: 'Rounds played', value: String(state.history.length), icon: Activity },
     { label: 'Total bets', value: formatStake(currentRound?.originalStake ?? state.currentStake), icon: CircleDollarSign },
     { label: 'Eligible winning bets', value: formatStake(eligibleStake), icon: BadgeCheck },
     { label: 'Manual results', value: String(state.auditLog.length), icon: Shield },
-  ], [state.history.length, state.auditLog.length, state.currentStake, currentRound?.originalStake, eligibleStake])
+  ]
 
   const selectedTeacher = getTeacherById(state.teachers, currentRound?.actualTeacherId ?? mainSelection ?? state.selectedTeacherId)
   const activeSpinExpired = Boolean(state.spin?.phase === 'selection' && !state.pausedWheel && state.spin.deadlineAt <= serverNow)
@@ -468,7 +515,7 @@ function AdminDashboard({
             ['Game stage', state.currentStage.replace('-', ' ')],
             ['Main wheel', state.spin?.wheel === 'main' ? state.spin.phase : currentRound?.actualTeacherId ? 'Result locked' : 'Ready'],
             ['Risk wheel', state.spin?.wheel === 'risk' ? state.spin.phase : currentRound?.riskMultiplier !== null && currentRound?.riskMultiplier !== undefined ? `${currentRound.riskMultiplier}X locked` : state.currentStage === 'risk-spin' ? 'Ready' : 'Locked'],
-            ['Potential payout', formatStake(eligibleStake * Math.max(state.settings.matchMultiplier, 4))],
+            ['Potential payout', formatStake(eligibleBets.reduce((total, bet) => total + bet.stake * Math.max(state.settings.matchMultiplier, 4), 0))],
             ['Final payout', formatStake(currentRound?.status === 'completed' ? currentRound.finalPayout : 0)],
           ].map(([label, value]) => <div className="summary-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}
           <div className="summary-card"><span>Average / max sync</span><strong>{latencyStats.average} / {latencyStats.maximum} ms</strong></div>
@@ -487,31 +534,66 @@ function AdminDashboard({
         <section className="control-grid" id="round-controls">
           <div className="panel">
             <div className="panel-header"><h3>Round management &amp; teacher bets</h3><BadgeCheck size={16} /></div>
-            <p className="field-hint">Enter anonymous total bets per teacher. The team records one collect-or-risk decision for all bets on the winning teacher. Max {formatStake(state.settings.maximumStake)} per teacher.</p>
-            <div className="bet-entry-grid">
+            <p className="field-hint">Record separate anonymous bets. No participant names or accounts are collected. Each stake must be {formatStake(state.settings.minimumStake)}–{formatStake(state.settings.maximumStake)}.</p>
+            <div className="anonymous-bet-form">
+              <label>
+                Teacher
+                <select
+                  value={newBetTeacherId}
+                  disabled={!connected || state.currentStage !== 'waiting' || Boolean(isRoundActive)}
+                  onChange={(event) => setNewBetTeacherId(event.target.value)}
+                >
+                  {state.teachers.filter((teacher) => teacher.isActive).map((teacher) => (
+                    <option key={teacher.id} value={teacher.id}>{teacher.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Stake
+                <input
+                  aria-label="Anonymous bet stake"
+                  type="number"
+                  min={state.settings.minimumStake}
+                  max={state.settings.maximumStake}
+                  step={1}
+                  value={newBetStake}
+                  disabled={!connected || state.currentStage !== 'waiting' || Boolean(isRoundActive)}
+                  onChange={(event) => setNewBetStake(event.target.value)}
+                />
+              </label>
+              <button
+                className="primary-button"
+                onClick={() => void addBet()}
+                disabled={!connected || state.currentStage !== 'waiting' || Boolean(isRoundActive)}
+              >
+                Add anonymous bet
+              </button>
+            </div>
+            <div className="readout"><strong>{isRoundActive ? 'Round stake:' : 'Total bets entered:'}</strong> {formatStake(currentRound?.originalStake ?? state.currentStake)} · {currentBets.length} bets</div>
+            <div className="anonymous-bet-list" aria-label="Anonymous bet records">
+              {currentBets.length ? currentBets.map((bet, index) => (
+                <div className="anonymous-bet-row" key={bet.id}>
+                  <span>Bet {index + 1} · {getTeacherById(state.teachers, bet.teacherId)?.name ?? 'Unknown teacher'}</span>
+                  <strong>{formatStake(bet.stake)}</strong>
+                  {currentRound
+                    ? <small>{bet.decision ? bet.decision.toUpperCase() : 'decision pending'}{currentRound.status === 'completed' ? ` · payout ${formatStake(bet.payout)}` : ''}</small>
+                    : <button
+                        className="secondary-button"
+                        onClick={() => removeBet(bet.id)}
+                        disabled={!connected}
+                        aria-label={`Remove anonymous bet ${index + 1}`}
+                      >Remove</button>}
+                </div>
+              )) : <p className="field-hint">No bets recorded yet.</p>}
+            </div>
+            <div className="teacher-bet-totals" aria-label="Total bets by teacher">
               {state.teachers.map((teacher) => (
-                <label className="bet-entry-row" key={teacher.id}>
-                  <span>{teacher.name}</span>
-                  <input
-                    aria-label={`${teacher.name} total bets`}
-                    type="number"
-                    min={0}
-                    max={state.settings.maximumStake}
-                    step={1}
-                    value={betDrafts[teacher.id] ?? String(state.teacherBets[teacher.id] ?? 0)}
-                    disabled={!connected || state.currentStage !== 'waiting' || Boolean(isRoundActive)}
-                    onChange={(event) => setBetDrafts((current) => ({ ...current, [teacher.id]: event.target.value }))}
-                    onBlur={() => updateTeacherBet(teacher.id)}
-                    onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
-                  />
-                  <strong>{formatStake(state.teacherBets[teacher.id] ?? 0)}</strong>
-                </label>
+                <div className="readout" key={teacher.id}><strong>{teacher.name}:</strong> {formatStake(currentRound ? currentRound.teacherBets[teacher.id] ?? 0 : state.teacherBets[teacher.id] ?? 0)}</div>
               ))}
             </div>
-            <div className="readout"><strong>Total bets entered:</strong> {formatStake(currentRound?.originalStake ?? state.currentStake)}</div>
             <div className="control-row">
-              <button className="primary-button" onClick={startRound} disabled={!connected || Boolean(isRoundActive) || totalConfiguredBets <= 0}>Start new round</button>
-              <button className="secondary-button" onClick={() => runCommand('round.next')} disabled={!connected || Boolean(isRoundActive) || state.currentStage !== 'waiting'}>Clear bets</button>
+              <button className="primary-button" onClick={startRound} disabled={!connected || state.currentStage !== 'waiting' || Boolean(isRoundActive) || totalConfiguredBets <= 0}>Start new round</button>
+              <button className="secondary-button" onClick={() => runCommand('round.next')} disabled={!connected || Boolean(isRoundActive) || state.currentStage !== 'waiting' || currentBets.length === 0}>Clear bets</button>
             </div>
             <div className="control-row">
               <button className="secondary-button" onClick={() => runCommand('round.reset')} disabled={!connected || !isRoundActive}>Cancel round</button>
@@ -560,11 +642,31 @@ function AdminDashboard({
 
         {state.currentStage === 'stage2' && isRoundActive && (
           <section className="panel decision-panel" aria-labelledby="risk-decision">
-            <div className="panel-header"><h3 id="risk-decision">DO YOU WANT TO TAKE A RISK?</h3><Swords size={18} /></div>
-            <p>Your teacher result is locked. Choose to collect the match payout or open the separate risk wheel.</p>
+            <div className="panel-header"><h3 id="risk-decision">INDIVIDUAL BET DECISIONS</h3><Swords size={18} /></div>
+            <p>For each winning anonymous bet, record a 2X collect or risk choice. Bets that choose risk share the separate risk-wheel outcome.</p>
+            <div className="eligible-bet-list">
+              {eligibleBets.map((bet, index) => (
+                <div className="eligible-bet-row" key={bet.id}>
+                  <div><strong>Bet {index + 1} · {formatStake(bet.stake)}</strong><small>{getTeacherById(state.teachers, bet.teacherId)?.name}</small></div>
+                  <div className="decision-actions">
+                    <button className={bet.decision === 'collect' ? 'primary-button selected-decision' : 'secondary-button'} onClick={() => setBetDecision(bet.id, 'collect')} disabled={!connected}>
+                      Collect {state.settings.matchMultiplier}X
+                    </button>
+                    <button className={bet.decision === 'risk' ? 'primary-button selected-decision' : 'secondary-button'} onClick={() => setBetDecision(bet.id, 'risk')} disabled={!connected}>
+                      Take risk
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
             <div className="decision-actions">
-              <button className="primary-button" onClick={chooseRisk} disabled={!connected}>YES — TAKE THE RISK</button>
-              <button className="secondary-button" onClick={() => runCommand('round.collect')} disabled={!connected}>NO — COLLECT {state.settings.matchMultiplier}X</button>
+              <button
+                className="primary-button"
+                onClick={() => void confirmBetDecisions()}
+                disabled={!connected || !decisionsComplete}
+              >
+                CONFIRM BET DECISIONS
+              </button>
             </div>
           </section>
         )}
@@ -621,11 +723,15 @@ function AdminDashboard({
           <div className="settings-grid">
             <label>Game title<input value={state.gameTitle} onChange={(event) => runCommand('admin.state.update', { state: { ...state, gameTitle: event.target.value }})} /></label>
             <label>Event name<input value={state.eventName} onChange={(event) => runCommand('admin.state.update', { state: { ...state, eventName: event.target.value }})} /></label>
+            <label>Minimum bet<input type="number" min={1} step={1} value={betLimitDrafts.minimumStake} disabled={!connected || Boolean(isRoundActive)} onChange={(event) => setBetLimitDrafts((current) => ({ ...current, minimumStake: event.target.value }))} /></label>
+            <label>Default bet<input type="number" min={1} step={1} value={betLimitDrafts.defaultStake} disabled={!connected || Boolean(isRoundActive)} onChange={(event) => setBetLimitDrafts((current) => ({ ...current, defaultStake: event.target.value }))} /></label>
+            <label>Maximum bet<input type="number" min={1} step={1} value={betLimitDrafts.maximumStake} disabled={!connected || Boolean(isRoundActive)} onChange={(event) => setBetLimitDrafts((current) => ({ ...current, maximumStake: event.target.value }))} /></label>
             <label>Match payout multiplier<input type="number" value={state.settings.matchMultiplier} onChange={(event) => {
               const value = Number(event.target.value)
               if (Number.isFinite(value) && value > 0) runCommand('admin.state.update', { state: { ...state, settings: { ...state.settings, matchMultiplier: value } } })
             }} /></label>
           </div>
+          <button className="primary-button" onClick={saveBetLimits} disabled={!connected || Boolean(isRoundActive)}>Save bet limits</button>
         </section>
 
         <nav className="mobile-bottom-nav" aria-label="Admin navigation">
@@ -660,7 +766,13 @@ function RiskRoulettePage({
   const selectedMultiplier = spin?.wheel === 'risk' ? spin.selectedId : null
   const lockedMultiplier = round?.riskMultiplier
   const isRoundActive = round?.status === 'in-progress'
-  const eligibleStake = round?.actualTeacherId ? round.teacherBets[round.actualTeacherId] ?? 0 : 0
+  const eligibleBets = round?.actualTeacherId
+    ? round.bets.filter((bet) => bet.teacherId === round.actualTeacherId)
+    : []
+  const riskBets = eligibleBets.filter((bet) => bet.decision === 'risk')
+  const collectBets = eligibleBets.filter((bet) => bet.decision === 'collect')
+  const riskStake = riskBets.reduce((total, bet) => total + bet.stake, 0)
+  const collectPayout = collectBets.reduce((total, bet) => total + bet.stake * state.settings.matchMultiplier, 0)
 
   const runCommand = (action: string, payload: Record<string, unknown> = {}) => {
     void sendCommand(action, payload)
@@ -683,7 +795,7 @@ function RiskRoulettePage({
         <div>
           <div className="eyebrow">PRIVATE ADMIN CONTROLS</div>
           <h1>RISK ROULETTE</h1>
-          <p>Separate second stage · Eligible winning bets {formatStake(eligibleStake)}</p>
+          <p>Separate second stage · {riskBets.length} risk bets · Risk stake {formatStake(riskStake)}</p>
         </div>
         <div className={`sync-status connection-${connectionStatus}`} role="status">
           {connectionStatus === 'connected' ? <Wifi size={16} /> : <WifiOff size={16} />}
@@ -702,6 +814,7 @@ function RiskRoulettePage({
               <Play size={16} /> START RISK SPIN
             </button>
           </div>
+          <div className="readout"><strong>Final payout preview:</strong> {formatStake(collectPayout + riskStake * (lockedMultiplier ?? 4))} {lockedMultiplier === null || lockedMultiplier === undefined ? '(maximum if risk lands on 4X)' : `(${lockedMultiplier}X risk result)`}</div>
           <CountdownPanel state={state} serverClockOffset={serverClockOffset} />
           <div className="risk-choice-grid">
             {([0, 3, 4] as const).map((multiplier) => (
@@ -737,7 +850,7 @@ function RiskRoulettePage({
             <span>Locked result</span>
             <strong>{lockedMultiplier === null || lockedMultiplier === undefined ? 'Waiting for spin' : `${lockedMultiplier}X · ${round?.riskResultMode ?? 'pending'}`}</strong>
             <span>Potential final payout</span>
-            <strong>{formatStake(eligibleStake * (lockedMultiplier ?? 0))}</strong>
+            <strong>{formatStake(collectPayout + riskStake * (lockedMultiplier ?? 0))}</strong>
           </div>
         </div>
       </main>
@@ -774,20 +887,20 @@ function AudienceScreen({ state, connectionStatus, serverClockOffset, riskOnly =
   const showingRisk = riskOnly || state.currentStage === 'risk-spin'
   const activeSpin = state.spin?.wheel === (showingRisk ? 'risk' : 'main') ? state.spin : null
   const announcement = state.currentStage === 'stage2'
-    ? 'DO YOU WANT TO TAKE A RISK?'
+    ? 'WINNING BETS: COLLECT 2X OR TAKE A RISK'
     : state.currentRound?.status === 'completed'
       ? state.audienceMessage
       : state.currentStage === 'no-winners'
         ? state.audienceMessage
         : showingRisk
-        ? state.currentRound?.riskMultiplier !== null && state.currentRound?.riskMultiplier !== undefined
-          ? `Risk result: ${state.currentRound.riskMultiplier}X`
-          : ''
-        : state.currentRound?.actualTeacherId
-          ? `Selected teacher: ${selectedTeacher?.name ?? '—'}`
-          : state.currentStage === 'waiting'
-            ? state.audienceMessage
-            : ''
+          ? state.currentRound?.riskMultiplier !== null && state.currentRound?.riskMultiplier !== undefined
+            ? `Risk result: ${state.currentRound.riskMultiplier}X`
+            : state.audienceMessage
+          : state.currentRound?.actualTeacherId
+            ? `Selected teacher: ${selectedTeacher?.name ?? '—'}`
+            : state.currentStage === 'waiting'
+              ? state.audienceMessage
+              : ''
   const resultMode = showingRisk ? state.currentRound?.riskResultMode : state.currentRound?.mainResultMode
 
   useEffect(() => {

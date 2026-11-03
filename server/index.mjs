@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
-import { extname, join, normalize, resolve } from 'node:path'
+import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes, randomInt, timingSafeEqual, randomUUID } from 'node:crypto'
 import { WebSocketServer, WebSocket } from 'ws'
@@ -57,6 +57,7 @@ function createInitialState() {
     selectedTeacherId: null,
     currentStake: 0,
     teacherBets: Object.fromEntries(seedTeachers.map((_, index) => [`teacher-${index + 1}`, 0])),
+    bets: [],
     selectedTeacherRoll: null,
     currentRound: null,
     history: [],
@@ -80,6 +81,12 @@ function createInitialState() {
 function readState() {
   try {
     const saved = JSON.parse(readFileSync(statePath, 'utf8'))
+    for (const [actionId, acknowledgement] of (saved._processedActions ?? []).slice(-20000)) {
+      if (typeof actionId === 'string' && actionId && acknowledgement && typeof acknowledgement === 'object') {
+        processedActions.set(actionId, acknowledgement)
+      }
+    }
+    delete saved._processedActions
     const defaults = createInitialState()
     const restored = {
       ...defaults,
@@ -87,13 +94,10 @@ function readState() {
       settings: { ...defaults.settings, ...saved.settings },
       revision: Number(saved.revision) || 0,
     }
-    restored.teacherBets = Object.fromEntries(
-      defaults.teachers.map((teacher) => {
-        const amount = saved.teacherBets?.[teacher.id]
-        return [teacher.id, Number.isSafeInteger(amount) && amount >= 0 && amount <= defaults.settings.maximumStake ? amount : 0]
-      }),
-    )
-    restored.currentStake = Object.values(restored.teacherBets).reduce((total, amount) => total + amount, 0)
+    if (!Array.isArray(restored.teachers) || restored.teachers.length === 0) restored.teachers = defaults.teachers
+    restored.bets = normalizeBets(saved.bets, saved.teacherBets, restored.teachers, restored.settings.maximumStake)
+    restored.teacherBets = aggregateBets(restored.bets, restored.teachers)
+    restored.currentStake = restored.bets.reduce((total, bet) => total + bet.stake, 0)
     delete restored.players
     delete restored.currentPlayerId
     delete restored.recentWinners
@@ -103,25 +107,73 @@ function readState() {
     delete restored.settings.randomOutcomeMode
     delete restored.settings.wheelSpinDuration
     delete restored.settings.animationSpeed
-    restored.history = Array.isArray(restored.history) ? restored.history.map(stripPlayerFields) : []
-    restored.currentRound = restored.currentRound ? stripPlayerFields(restored.currentRound) : null
+    restored.history = Array.isArray(restored.history)
+      ? restored.history.map((round) => stripPlayerFields(round, restored.teachers, restored.settings.maximumStake))
+      : []
+    restored.currentRound = restored.currentRound
+      ? stripPlayerFields(restored.currentRound, restored.teachers, restored.settings.maximumStake)
+      : null
     if (restored.currentStage === 'bet') restored.currentStage = restored.currentRound ? 'teacher-spin' : 'waiting'
     if (restored.spin && (!restored.spin.phase || !restored.spin.deadlineAt)) restored.spin = null
     return restored
-  } catch {
-    return createInitialState()
+  } catch (error) {
+    if (error.code === 'ENOENT') return createInitialState()
+    console.error('Unable to restore game state:', error)
+    throw error
   }
 }
 
-function stripPlayerFields(round) {
+function normalizeBets(records, legacyTotals, teachers, maximumStake) {
+  const source = Array.isArray(records)
+    ? records
+    : Object.entries(legacyTotals ?? {}).map(([teacherId, stake]) => ({ teacherId, stake }))
+  const ids = new Set()
+  return source.flatMap((record) => {
+    const teacherId = String(record?.teacherId ?? '')
+    const stake = Number(record?.stake)
+    if (!teachers.some((teacher) => teacher.id === teacherId)
+      || !Number.isSafeInteger(stake)
+      || stake <= 0
+      || stake > maximumStake) return []
+    let id = String(record.id ?? '')
+    if (!id || ids.has(id)) id = randomUUID()
+    ids.add(id)
+    return [{
+      id,
+      teacherId,
+      stake,
+      decision: record.decision === 'collect' || record.decision === 'risk' ? record.decision : null,
+      payout: Number.isSafeInteger(record.payout) && record.payout >= 0 ? record.payout : 0,
+    }]
+  })
+}
+
+function aggregateBets(bets, teachers) {
+  const totals = Object.fromEntries(teachers.map((teacher) => [teacher.id, 0]))
+  for (const bet of bets) totals[bet.teacherId] = (totals[bet.teacherId] ?? 0) + bet.stake
+  return totals
+}
+
+function stripPlayerFields(round, teachers = seedTeachers.map(([name], index) => ({ id: `teacher-${index + 1}`, name })), maximumStake = 500) {
   const { playerId, playerName, selectedTeacherId, resultMode, ...cleanRound } = round
   void playerId
   void playerName
   void selectedTeacherId
   void resultMode
+  const legacyBetRecords = Array.isArray(cleanRound.bets)
+    ? cleanRound.bets
+    : Object.entries(cleanRound.teacherBets ?? {}).map(([teacherId, stake]) => ({
+        teacherId,
+        stake,
+        payout: teacherId === cleanRound.actualTeacherId ? cleanRound.finalPayout : 0,
+      }))
+  const bets = normalizeBets(legacyBetRecords, null, teachers, maximumStake)
   return {
     ...cleanRound,
-    teacherBets: cleanRound.teacherBets ?? (cleanRound.actualTeacherId ? { [cleanRound.actualTeacherId]: cleanRound.originalStake ?? 0 } : {}),
+    bets,
+    teacherBets: aggregateBets(bets, teachers),
+    originalStake: bets.reduce((total, bet) => total + bet.stake, 0),
+    finalPayout: bets.reduce((total, bet) => total + bet.payout, 0),
     stageOneResult: cleanRound.actualTeacherId ? 'selected' : 'pending',
     mainResultMode: cleanRound.mainResultMode ?? (cleanRound.actualTeacherId ? resultMode === 'manual' ? 'operator-controlled' : 'random' : null),
     riskResultMode: cleanRound.riskResultMode ?? (cleanRound.riskMultiplier !== null ? resultMode === 'manual' ? 'operator-controlled' : 'random' : null),
@@ -131,16 +183,24 @@ function stripPlayerFields(round) {
 let state = readState()
 
 function persistState() {
+  const temporaryPath = `${statePath}.${process.pid}.tmp`
   try {
-    const { mkdirSync, writeFileSync } = awaitImportFs
-    mkdirSync(join(root, 'data'), { recursive: true })
-    writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf8')
+    mkdirSync(dirname(statePath), { recursive: true })
+    writeFileSync(temporaryPath, JSON.stringify({
+      ...state,
+      _processedActions: Array.from(processedActions.entries()).slice(-20000),
+    }, null, 2), 'utf8')
+    renameSync(temporaryPath, statePath)
   } catch (error) {
     console.error('Unable to persist game state:', error)
+    try {
+      unlinkSync(temporaryPath)
+    } catch (cleanupError) {
+      if (cleanupError.code !== 'ENOENT') console.error('Unable to remove temporary game state:', cleanupError)
+    }
+    throw error
   }
 }
-
-import * as awaitImportFs from 'node:fs'
 
 persistState()
 
@@ -160,7 +220,10 @@ function publicState(socket) {
     ...snapshot,
     currentStake: 0,
     teacherBets: hiddenBets,
-    currentRound: state.currentRound ? { ...state.currentRound, originalStake: 0, teacherBets: hiddenBets } : null,
+    bets: [],
+    currentRound: state.currentRound
+      ? { ...state.currentRound, originalStake: 0, teacherBets: hiddenBets, bets: [] }
+      : null,
     history: [],
     auditLog: [],
     selectedTeacherId: state.spin?.wheel === 'main' ? null : state.selectedTeacherId,
@@ -175,9 +238,9 @@ function send(socket, payload) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload))
 }
 
-function broadcastState(event = 'state') {
+function broadcastState(event = 'state', shouldPersist = true) {
   state.serverTime = Date.now()
-  persistState()
+  if (shouldPersist) persistState()
   for (const socket of clients) {
     send(socket, { type: event, state: publicState(socket), serverTime: Date.now() })
   }
@@ -197,7 +260,35 @@ function randomRisk() {
 }
 
 function winningStake(round) {
-  return round?.actualTeacherId ? Number(round.teacherBets?.[round.actualTeacherId]) || 0 : 0
+  return round?.actualTeacherId
+    ? round.bets.filter((bet) => bet.teacherId === round.actualTeacherId).reduce((total, bet) => total + bet.stake, 0)
+    : 0
+}
+
+function winningBets(round) {
+  return round?.actualTeacherId ? round.bets.filter((bet) => bet.teacherId === round.actualTeacherId) : []
+}
+
+function settleRound(round, riskMultiplier = null) {
+  if (!round || round.status !== 'in-progress') throw new Error('This round has already been finalized.')
+  const bets = round.bets.map((bet) => ({
+    ...bet,
+    payout: bet.decision === 'collect'
+      ? bet.stake * state.settings.matchMultiplier
+      : bet.decision === 'risk' && riskMultiplier !== null
+        ? bet.stake * riskMultiplier
+        : 0,
+  }))
+  const finalPayout = bets.reduce((total, bet) => total + bet.payout, 0)
+  return {
+    ...round,
+    bets,
+    riskMultiplier,
+    finalPayout,
+    stageTwoDecision: bets.some((bet) => bet.decision === 'risk')
+      ? bets.some((bet) => bet.decision === 'collect') ? 'mixed' : 'risk'
+      : 'collect',
+  }
 }
 
 function formatPoints(amount) {
@@ -222,7 +313,7 @@ function finishRound(round) {
 let roundReturnTimer
 
 function returnToMainAfterFinal() {
-  if (state.currentStage !== 'final' || state.currentRound?.status !== 'completed') return
+  if (state.currentStage !== 'final' || !['completed', 'cancelled'].includes(state.currentRound?.status)) return
   state = {
     ...state,
     currentRound: null,
@@ -231,6 +322,7 @@ function returnToMainAfterFinal() {
     selectedTeacherRoll: null,
     currentStake: 0,
     teacherBets: Object.fromEntries(state.teachers.map((teacher) => [teacher.id, 0])),
+    bets: [],
     spin: null,
     pausedWheel: null,
     audienceMessage: 'Ready for the next event round.',
@@ -245,7 +337,7 @@ function scheduleRoundReturn() {
   roundReturnTimer = setTimeout(returnToMainAfterFinal, 5000)
 }
 
-if (state.currentStage === 'final' && state.currentRound?.status === 'completed') scheduleRoundReturn()
+if (state.currentStage === 'final' && ['completed', 'cancelled'].includes(state.currentRound?.status)) scheduleRoundReturn()
 
 function startWheelSelection(wheel, actionId) {
   const now = Date.now()
@@ -306,7 +398,8 @@ function completeSpin(wheel) {
   if (wheel === 'main') {
     const teacher = findTeacher(spin.resultId)
     if (!teacher || !spin.resultMode) return false
-    const eligibleStake = Number(round.teacherBets?.[teacher.id]) || 0
+    const eligibleBets = round.bets.filter((bet) => bet.teacherId === teacher.id)
+    const eligibleStake = eligibleBets.reduce((total, bet) => total + bet.stake, 0)
     state.currentRound = {
       ...round,
       actualTeacherId: teacher.id,
@@ -317,8 +410,8 @@ function completeSpin(wheel) {
     state.selectedTeacherRoll = teacher.id
     state.currentStage = eligibleStake > 0 ? 'stage2' : 'no-winners'
     state.audienceMessage = eligibleStake > 0
-      ? `Winning teacher: ${teacher.name}. ${formatPoints(eligibleStake)} in bets are eligible to collect or take a risk.`
-      : `No winning bets on ${teacher.name}. The team must confirm to return to the main game.`
+      ? `Winning teacher: ${teacher.name}. ${eligibleBets.length} anonymous bets are eligible for individual collect-or-risk decisions.`
+      : `NO WINNING BETS ON THIS TEACHER! No bets were placed on ${teacher.name}.`
     state.lastAction = 'Main wheel result locked'
   } else {
     const multiplier = Number(spin.resultId)
@@ -395,9 +488,11 @@ function scheduleSpinTimers() {
   }
 }
 
+scheduleSpinTimers()
+
 function applyAdminUpdate(candidate) {
   if (!candidate || typeof candidate !== 'object') throw new Error('Invalid settings update.')
-  for (const key of ['currentRound', 'history', 'auditLog', 'currentStage', 'selectedTeacherRoll', 'outerWheelRotation', 'innerWheelRotation', 'outerSpinSequence', 'innerSpinSequence', 'spin']) {
+  for (const key of ['currentRound', 'history', 'auditLog', 'currentStage', 'selectedTeacherRoll', 'outerWheelRotation', 'innerWheelRotation', 'outerSpinSequence', 'innerSpinSequence', 'spin', 'bets', 'teacherBets', 'currentStake']) {
     if (JSON.stringify(candidate[key]) !== JSON.stringify(state[key])) throw new Error(`Protected game field cannot be edited directly: ${key}`)
   }
   if (!Array.isArray(candidate.teachers) || !candidate.settings) {
@@ -405,14 +500,19 @@ function applyAdminUpdate(candidate) {
   }
   if (candidate.teachers.filter((teacher) => teacher.isActive).length === 0) throw new Error('At least one teacher must remain active.')
   const maximumStake = Number(candidate.settings.maximumStake)
+  const minimumStake = Number(candidate.settings.minimumStake)
+  const defaultStake = Number(candidate.settings.defaultStake)
   const matchMultiplier = Number(candidate.settings.matchMultiplier)
-  if (!Number.isSafeInteger(maximumStake) || maximumStake <= 0 || !Number.isFinite(matchMultiplier) || matchMultiplier <= 0) {
-    throw new Error('Maximum bet and match multiplier must be positive valid numbers.')
+  if (!Number.isSafeInteger(minimumStake) || minimumStake <= 0
+    || !Number.isSafeInteger(defaultStake) || defaultStake < minimumStake
+    || !Number.isSafeInteger(maximumStake) || maximumStake < defaultStake
+    || !Number.isFinite(matchMultiplier) || matchMultiplier <= 0) {
+    throw new Error('Bet limits must be positive whole numbers with minimum <= default <= maximum; the match multiplier must be positive.')
   }
-  if (Object.values(state.teacherBets).some((amount) => amount > maximumStake)) {
-    throw new Error('Maximum bet cannot be lower than an already entered teacher total.')
+  if (state.bets.some((bet) => bet.stake < minimumStake || bet.stake > maximumStake)) {
+    throw new Error('Bet limits cannot exclude a bet that has already been entered.')
   }
-  const stake = Object.values(state.teacherBets).reduce((total, amount) => total + amount, 0)
+  const stake = state.bets.reduce((total, bet) => total + bet.stake, 0)
   state = {
     ...state,
     gameTitle: String(candidate.gameTitle).slice(0, 80),
@@ -420,6 +520,7 @@ function applyAdminUpdate(candidate) {
     teachers: candidate.teachers,
     settings: candidate.settings,
     selectedTeacherId: candidate.selectedTeacherId,
+    teacherBets: aggregateBets(state.bets, candidate.teachers),
     currentStake: stake,
   }
 }
@@ -427,34 +528,53 @@ function applyAdminUpdate(candidate) {
 function applyCommand(action, payload, actionId) {
   const round = state.currentRound
   switch (action) {
-    case 'admin.bets.update': {
+    case 'admin.bet.add': {
       if (state.currentStage !== 'waiting' || round?.status === 'in-progress') throw new Error('Bets can only be updated between rounds.')
       const teacher = findTeacher(String(payload.teacherId ?? ''), true)
       const amount = Number(payload.amount)
-      if (!teacher) throw new Error('Choose an active teacher for this bet total.')
-      if (!Number.isSafeInteger(amount) || amount < 0 || amount > state.settings.maximumStake) {
-        throw new Error(`Bet total must be a whole number from 0 to ${state.settings.maximumStake}.`)
+      if (!teacher) throw new Error('Choose an active teacher for this bet.')
+      if (!Number.isSafeInteger(amount) || amount < state.settings.minimumStake || amount > state.settings.maximumStake) {
+        throw new Error(`Each anonymous bet must be a whole number from ${state.settings.minimumStake} to ${state.settings.maximumStake}.`)
       }
-      const teacherBets = { ...state.teacherBets, [teacher.id]: amount }
+      if (!Number.isSafeInteger(state.currentStake + amount)) throw new Error('The combined stake exceeds the supported total.')
+      const bet = { id: randomUUID(), teacherId: teacher.id, stake: amount, decision: null, payout: 0 }
+      const bets = [...state.bets, bet]
       state = {
         ...state,
-        teacherBets,
-        currentStake: Object.values(teacherBets).reduce((total, bet) => total + bet, 0),
-        lastAction: `Updated bets for ${teacher.name}`,
+        bets,
+        teacherBets: aggregateBets(bets, state.teachers),
+        currentStake: bets.reduce((total, currentBet) => total + currentBet.stake, 0),
+        lastAction: `Recorded anonymous bet on ${teacher.name}`,
+      }
+      break
+    }
+    case 'admin.bet.remove': {
+      if (state.currentStage !== 'waiting' || round?.status === 'in-progress') throw new Error('Bets can only be updated between rounds.')
+      const bets = state.bets.filter((bet) => bet.id !== String(payload.betId ?? ''))
+      if (bets.length === state.bets.length) throw new Error('That anonymous bet no longer exists.')
+      state = {
+        ...state,
+        bets,
+        teacherBets: aggregateBets(bets, state.teachers),
+        currentStake: bets.reduce((total, bet) => total + bet.stake, 0),
+        lastAction: 'Removed an anonymous bet',
       }
       break
     }
     case 'round.start': {
+      if (state.currentStage !== 'waiting') throw new Error('Wait until the game is ready before starting another round.')
       if (round?.status === 'in-progress') throw new Error('An active round already exists.')
       clearTimeout(roundReturnTimer)
-      const teacherBets = { ...state.teacherBets }
-      const stake = Object.values(teacherBets).reduce((total, amount) => total + amount, 0)
-      if (stake <= 0) throw new Error('Enter at least one teacher bet total before starting a round.')
+      const bets = state.bets.map((bet) => ({ ...bet, decision: null, payout: 0 }))
+      const teacherBets = aggregateBets(bets, state.teachers)
+      const stake = bets.reduce((total, bet) => total + bet.stake, 0)
+      if (stake <= 0) throw new Error('Record at least one anonymous bet before starting a round.')
       const newRound = {
         id: randomUUID(),
         actualTeacherId: null,
         originalStake: stake,
         teacherBets,
+        bets,
         stageOneResult: 'pending',
         stageTwoDecision: null,
         riskMultiplier: null,
@@ -464,7 +584,7 @@ function applyCommand(action, payload, actionId) {
         riskResultMode: null,
         createdAt: new Date().toISOString(),
       }
-      state = { ...state, currentRound: newRound, currentStage: 'teacher-spin', currentStake: stake, selectedTeacherRoll: null, spin: null, audienceMessage: `New event round started with a ${stake} point stake.`, lastAction: 'New round started' }
+      state = { ...state, currentRound: newRound, currentStage: 'teacher-spin', currentStake: stake, selectedTeacherRoll: null, spin: null, audienceMessage: `New event round started with ${bets.length} anonymous bets totaling ${stake} points.`, lastAction: 'New round started' }
       break
     }
     case 'teacher.spin': {
@@ -496,21 +616,54 @@ function applyCommand(action, payload, actionId) {
     case 'teacher.confirm':
       if (!lockSpin('main')) throw new Error('There is no open main-wheel selection to confirm.')
       break
-    case 'stage2.start':
-      if (!round || round.status !== 'in-progress' || state.currentStage !== 'stage2' || round.stageTwoDecision || winningStake(round) <= 0) throw new Error('Risk is only available when the winning teacher has eligible bets.')
-      state = { ...state, currentStage: 'risk-spin', spin: null, audienceMessage: 'DO YOU WANT TO TAKE A RISK? The risk wheel is ready.', lastAction: 'Administrator chose to take the risk' }
+    case 'round.bet.decision': {
+      if (!round || round.status !== 'in-progress' || state.currentStage !== 'stage2' || round.stageTwoDecision) {
+        throw new Error('Individual collect-or-risk decisions are only open after the main wheel stops.')
+      }
+      const betId = String(payload.betId ?? '')
+      const decision = payload.decision
+      if (decision !== 'collect' && decision !== 'risk') throw new Error('Choose collect or risk for this bet.')
+      if (!winningBets(round).some((bet) => bet.id === betId)) throw new Error('That bet is not eligible for this teacher result.')
+      const bets = round.bets.map((bet) => bet.id === betId ? { ...bet, decision } : bet)
+      state.currentRound = { ...round, bets }
+      state.audienceMessage = 'The team is recording anonymous collect-or-risk choices.'
+      state.lastAction = 'Updated an anonymous bet decision'
       break
-    case 'round.collect': {
-      if (!round || round.status !== 'in-progress' || state.currentStage !== 'stage2' || round.stageTwoDecision) throw new Error('The 2X payout is not available.')
-      const eligibleStake = winningStake(round)
-      const completed = { ...round, stageTwoDecision: 'collect', finalPayout: eligibleStake * state.settings.matchMultiplier }
-      state = { ...state, currentRound: completed, spin: null, audienceMessage: `NO — COLLECT ${state.settings.matchMultiplier}X. ${formatPoints(eligibleStake)} eligible stake pays ${formatPoints(completed.finalPayout)}.`, lastAction: `Collected ${state.settings.matchMultiplier}X payout` }
+    }
+    case 'round.decisions.confirm': {
+      if (!round || round.status !== 'in-progress' || state.currentStage !== 'stage2' || round.stageTwoDecision) {
+        throw new Error('There are no open bet decisions to confirm.')
+      }
+      const eligibleBets = winningBets(round)
+      if (!eligibleBets.length || eligibleBets.some((bet) => !bet.decision)) {
+        throw new Error('Choose collect or risk for every eligible bet before confirming.')
+      }
+      const riskBets = eligibleBets.filter((bet) => bet.decision === 'risk')
+      if (riskBets.length) {
+        const hasCollectBets = eligibleBets.some((bet) => bet.decision === 'collect')
+        state.currentRound = {
+          ...round,
+          stageTwoDecision: hasCollectBets ? 'mixed' : 'risk',
+          audienceMessage: `${riskBets.length} anonymous bets are advancing to the risk wheel.`,
+        }
+        state.currentStage = 'risk-spin'
+        state.spin = null
+        state.lastAction = 'Confirmed individual collect-or-risk decisions'
+        break
+      }
+      const completed = settleRound({ ...round, stageTwoDecision: 'collect' })
+      state = {
+        ...state,
+        currentRound: completed,
+        audienceMessage: `All winning bets collect ${state.settings.matchMultiplier}X. Final payout: ${formatPoints(completed.finalPayout)}.`,
+        lastAction: `Confirmed individual ${state.settings.matchMultiplier}X payouts`,
+      }
       finishRound(completed)
       break
     }
     case 'round.no-winners.confirm': {
       if (!round || round.status !== 'in-progress' || state.currentStage !== 'no-winners' || winningStake(round) !== 0) throw new Error('This round does not have a no-winning-bets result to confirm.')
-      const completed = { ...round, stageTwoDecision: 'no-winners', finalPayout: 0 }
+      const completed = { ...round, stageTwoDecision: 'no-winners', bets: round.bets.map((bet) => ({ ...bet, payout: 0 })), finalPayout: 0 }
       state = { ...state, currentRound: completed, audienceMessage: `No winning bets. ${findTeacher(round.actualTeacherId)?.name ?? 'The selected teacher'} was not backed.`, lastAction: 'Confirmed no winning bets' }
       finishRound(completed)
       break
@@ -519,9 +672,9 @@ function applyCommand(action, payload, actionId) {
       if (state.spin?.wheel === 'risk' && lockSpin('risk')) break
       if (!round || round.status !== 'in-progress' || state.currentStage !== 'risk-spin' || state.spin || round.riskMultiplier === null) throw new Error('There is no locked risk result to confirm.')
       const multiplier = round.riskMultiplier
-      const eligibleStake = winningStake(round)
-      const completed = { ...round, stageTwoDecision: 'risk', finalPayout: eligibleStake * multiplier }
-      state = { ...state, currentRound: completed, spin: null, audienceMessage: `Final risk result: ${multiplier}X on ${formatPoints(eligibleStake)} eligible stake for ${formatPoints(completed.finalPayout)}.`, lastAction: 'Risk wheel payout confirmed' }
+      const riskStake = winningBets(round).filter((bet) => bet.decision === 'risk').reduce((total, bet) => total + bet.stake, 0)
+      const completed = settleRound(round, multiplier)
+      state = { ...state, currentRound: completed, spin: null, audienceMessage: `Final risk result: ${multiplier}X on ${formatPoints(riskStake)} risk stake. Total payout: ${formatPoints(completed.finalPayout)}.`, lastAction: 'Risk wheel payout confirmed' }
       finishRound(completed)
       break
     }
@@ -552,7 +705,7 @@ function applyCommand(action, payload, actionId) {
     case 'round.next':
       if (round?.status === 'in-progress') throw new Error('Finalize or cancel the active round before starting another.')
       clearTimeout(roundReturnTimer)
-      state = { ...state, currentRound: null, currentStage: 'waiting', selectedTeacherRoll: null, spin: null, selectedTeacherId: null, currentStake: 0, teacherBets: Object.fromEntries(state.teachers.map((teacher) => [teacher.id, 0])), outerWheelStartRotation: state.outerWheelRotation, innerWheelStartRotation: state.innerWheelRotation, pausedWheel: null, audienceMessage: 'Ready for the next event round. Enter teacher bet totals to begin.', lastAction: 'Prepared next round' }
+      state = { ...state, currentRound: null, currentStage: 'waiting', selectedTeacherRoll: null, spin: null, selectedTeacherId: null, currentStake: 0, teacherBets: Object.fromEntries(state.teachers.map((teacher) => [teacher.id, 0])), bets: [], outerWheelStartRotation: state.outerWheelRotation, innerWheelStartRotation: state.innerWheelRotation, pausedWheel: null, audienceMessage: 'Ready for the next event round. Record anonymous bets to begin.', lastAction: 'Prepared next round' }
       break
     case 'round.reset': {
       if (!round || round.status !== 'in-progress') throw new Error('There is no active round to reset.')
@@ -563,6 +716,7 @@ function applyCommand(action, payload, actionId) {
       clearSpinTimer('risk:complete')
       state = { ...state, currentRound: cancelled, currentStage: 'final', spin: null, pausedWheel: null, audienceMessage: 'Round cancelled by the administrator. No payout was processed.', lastAction: `Round ${round.id} cancelled by administrator` }
       state.history.unshift({ ...cancelled, completedAt: new Date().toISOString() })
+      scheduleRoundReturn()
       break
     }
     case 'admin.state.update':
@@ -589,13 +743,27 @@ function verifyOrigin(request) {
   const origin = request.headers.origin
   if (!origin) return true
   try {
-    return new URL(origin).host === request.headers.host
+    const parsedOrigin = new URL(origin).origin
+    const allowedOrigins = [
+      process.env.FRONTEND_ORIGIN,
+      ...(process.env.ALLOWED_ORIGINS ?? '').split(','),
+    ].map((value) => value?.trim()).filter(Boolean)
+    return allowedOrigins.length
+      ? allowedOrigins.includes(parsedOrigin)
+      : parsedOrigin === `${request.headers['x-forwarded-proto'] ?? 'http'}://${request.headers.host}`
   } catch {
     return false
   }
 }
 
 const httpServer = createServer(async (request, response) => {
+  if (request.method === 'GET' && request.url === '/health') {
+    response.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    }).end(JSON.stringify({ status: 'ok', revision: state.revision, serverTime: Date.now() }))
+    return
+  }
   if (request.url?.startsWith('/ws')) {
     response.writeHead(426, { 'Content-Type': 'text/plain' }).end('WebSocket upgrade required')
     return
@@ -685,6 +853,7 @@ websocketServer.on('connection', (socket) => {
       return
     }
     if (message.type === 'connection.reconnected') {
+      if (!socket.authenticated || !sessions.has(socket.token)) return
       const duration = Math.max(0, Math.min(Number(message.durationMs) || 0, 120000))
       state.syncMetrics.reconnects += 1
       state.syncMetrics.averageReconnectMs = Math.round(((state.syncMetrics.averageReconnectMs * (state.syncMetrics.reconnects - 1)) + duration) / state.syncMetrics.reconnects)
@@ -719,6 +888,7 @@ websocketServer.on('connection', (socket) => {
     socket.lastSequence = sequence
 
     const receivedAt = Date.now()
+    const previousState = structuredClone(state)
     try {
       const nextState = applyCommand(String(message.action ?? ''), message.payload ?? {}, actionId)
       const latency = Math.max(0, Date.now() - receivedAt)
@@ -728,16 +898,22 @@ websocketServer.on('connection', (socket) => {
       const ack = { type: 'ack', requestId, actionId, ok: true, revision: nextState.revision, serverTime: Date.now(), latencyMs: latency }
       processedActions.set(actionId, ack)
       if (processedActions.size > 20000) processedActions.delete(processedActions.keys().next().value)
+      persistState()
       send(socket, ack)
-      broadcastState('state')
+      broadcastState('state', false)
     } catch (error) {
+      state = previousState
+      processedActions.delete(actionId)
+      for (const key of spinTimers.keys()) clearSpinTimer(key)
+      scheduleSpinTimers()
       state.syncMetrics.failedCommands += 1
       state.revision += 1
       state.serverTime = Date.now()
       const errorAck = { type: 'ack', requestId, actionId, ok: false, error: error.message, serverTime: Date.now() }
       processedActions.set(actionId, errorAck)
+      persistState()
       send(socket, errorAck)
-      broadcastState('state')
+      broadcastState('state', false)
     }
   })
 

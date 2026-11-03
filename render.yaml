@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: eecohm-teacher-roulette-backend
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    disk:
+      name: game-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GAME_STATE_PATH
+        value: /var/data/game-state.json
+      - key: FRONTEND_ORIGIN
+        value: https://eechohm-teacher-roulette.vercel.app
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false

@@ -110,8 +110,16 @@ export class GameRealtimeClient {
   private openSocket() {
     if (this.closed) return
     this.handlers.onStatus(this.wasConnected ? 'reconnecting' : 'connecting')
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`)
+    const configuredUrl = import.meta.env.VITE_WS_URL
+    const socketUrl = configuredUrl
+      ? new URL(configuredUrl, window.location.origin)
+      : new URL(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`)
+    if (socketUrl.protocol !== 'ws:' && socketUrl.protocol !== 'wss:') {
+      this.handlers.onError('The configured realtime URL must use ws:// or wss://.')
+      this.handlers.onStatus('disconnected')
+      return
+    }
+    const socket = new WebSocket(socketUrl)
     this.socket = socket
 
     socket.addEventListener('open', () => {

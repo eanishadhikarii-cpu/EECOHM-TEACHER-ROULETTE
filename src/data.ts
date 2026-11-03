@@ -35,6 +35,7 @@ export function createInitialState(): GameState {
     selectedTeacherId: null,
     currentStake: 0,
     teacherBets: Object.fromEntries(defaultTeachers.map((teacher) => [teacher.id, 0])),
+    bets: [],
     selectedTeacherRoll: null,
     currentRound: null,
     history: [],

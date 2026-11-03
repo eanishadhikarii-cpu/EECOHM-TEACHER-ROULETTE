@@ -30,13 +30,22 @@ export interface GameSettings {
   riskMultipliers: RiskMultiplier[]
 }
 
+export interface AnonymousBet {
+  id: string
+  teacherId: string
+  stake: number
+  decision: 'collect' | 'risk' | null
+  payout: number
+}
+
 export interface ActiveRound {
   id: string
   actualTeacherId: string | null
   originalStake: number
   stageOneResult: 'pending' | 'selected'
-  stageTwoDecision: 'collect' | 'risk' | 'no-winners' | null
+  stageTwoDecision: 'collect' | 'risk' | 'mixed' | 'no-winners' | null
   teacherBets: Record<string, number>
+  bets: AnonymousBet[]
   riskMultiplier: RiskMultiplier | null
   finalPayout: number
   status: 'in-progress' | 'completed' | 'cancelled'
@@ -67,6 +76,7 @@ export interface GameState {
   selectedTeacherId: string | null
   currentStake: number
   teacherBets: Record<string, number>
+  bets: AnonymousBet[]
   selectedTeacherRoll: string | null
   currentRound: ActiveRound | null
   history: RoundHistoryEntry[]
