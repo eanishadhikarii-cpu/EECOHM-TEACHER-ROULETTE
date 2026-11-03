@@ -1,0 +1,63 @@
+import type { GameState, Teacher } from './types'
+
+export const defaultTeachers: Teacher[] = [
+  { id: 'teacher-1', name: 'Mr. Sharma', personality: 'Angry Professor', imageUrl: '', color: '#ff6b6b', isActive: true, position: 1 },
+  { id: 'teacher-2', name: 'Mrs. Rai', personality: 'Strict Examiner', imageUrl: '', color: '#ffd93d', isActive: true, position: 2 },
+  { id: 'teacher-3', name: 'Mr. Khan', personality: 'Sleeping Teacher', imageUrl: '', color: '#6c5ce7', isActive: true, position: 3 },
+  { id: 'teacher-4', name: 'Mrs. Thapa', personality: 'Homework Queen', imageUrl: '', color: '#00d2d3', isActive: true, position: 4 },
+  { id: 'teacher-5', name: 'Mr. Joshi', personality: 'Attendance Police', imageUrl: '', color: '#ff9f1c', isActive: true, position: 5 },
+  { id: 'teacher-6', name: 'Mrs. Gurung', personality: 'Dancing Teacher', imageUrl: '', color: '#ef476f', isActive: true, position: 6 },
+  { id: 'teacher-7', name: 'Mr. Das', personality: 'Calculator Master', imageUrl: '', color: '#1dd1a1', isActive: true, position: 7 },
+  { id: 'teacher-8', name: 'Mrs. Lama', personality: 'Surprise Test Queen', imageUrl: '', color: '#a29bfe', isActive: true, position: 8 },
+  { id: 'teacher-9', name: 'Mr. Adhikari', personality: 'Late Entry King', imageUrl: '', color: '#feca57', isActive: true, position: 9 },
+  { id: 'teacher-10', name: 'Mrs. Singh', personality: 'Grammar Police', imageUrl: '', color: '#48dbfb', isActive: true, position: 10 },
+  { id: 'teacher-11', name: 'Mr. Pandey', personality: 'Mobile Confiscator', imageUrl: '', color: '#ff9ff3', isActive: true, position: 11 },
+  { id: 'teacher-12', name: 'Mrs. Karki', personality: "Principal's Favourite", imageUrl: '', color: '#c56cf0', isActive: true, position: 12 },
+]
+
+export function createInitialState(): GameState {
+  return {
+    gameTitle: 'TEACHER ROULETTE',
+    eventName: 'College Gala Night',
+    teachers: defaultTeachers,
+    settings: {
+      gameTitle: 'TEACHER ROULETTE',
+      eventName: 'College Gala Night',
+      defaultStake: 100,
+      minimumStake: 20,
+      maximumStake: 500,
+      soundEnabled: true,
+      confettiEnabled: true,
+      matchMultiplier: 2,
+      riskMultipliers: [0, 3, 4],
+    },
+    currentStage: 'waiting',
+    selectedTeacherId: null,
+    currentStake: 100,
+    selectedTeacherRoll: null,
+    currentRound: null,
+    history: [],
+    auditLog: [],
+    audienceMessage: 'Ready for the next event round.',
+    lastAction: 'System ready',
+    outerWheelRotation: 0,
+    innerWheelRotation: 0,
+    outerWheelStartRotation: 0,
+    innerWheelStartRotation: 0,
+    outerSpinSequence: 0,
+    innerSpinSequence: 0,
+    locked: false,
+    pausedWheel: null,
+    revision: 0,
+    serverTime: Date.now(),
+    syncMetrics: {
+      commands: 0,
+      failedCommands: 0,
+      averageLatencyMs: 0,
+      maxLatencyMs: 0,
+      reconnects: 0,
+      averageReconnectMs: 0,
+      maxReconnectMs: 0,
+    },
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "Teacher Roulette Admin",
+  "short_name": "Roulette Admin",
+  "description": "Mobile control panel for Teacher Roulette events.",
+  "start_url": "/admin",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#07131c",
+  "theme_color": "#07131c",
+  "icons": [
+    {
+      "src": "/roulette-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
